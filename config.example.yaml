@@ -1,0 +1,114 @@
+persona:
+  assistant_name: 小智
+  user_name: 小朋友
+  language: zh
+  character: '你是小智，一个运行在 ESP32 硬件上的中文语音助手。回答口语化、简短、亲切。'
+  speech_speed: -5%
+  pitch: +0Hz
+server:
+  host: 0.0.0.0
+  port: 8003
+  public_host: ''                      # 服务对外地址；留空则按请求 Host 推断
+  token: change-me                     # 设备端 Authorization: Bearer <token>，请改成自己的
+  ws_path: /xiaozhi/v1/
+ota:
+  offer_firmware: false
+  firmware_version: 2.5.3
+  firmware_url: ''
+llm:
+  active: deepseek-v4.1-flash
+  system_prompt: '你是一个运行在 ESP32 硬件上的中文语音助手，服务的对象是小学生。
+
+    回答要求：口语化、简短，一般不超过 60 个字；不要使用 markdown、列表、代码块、表情符号；回答要注意对象为未成年人。
+
+    不要输出括号里的动作描述；遇到不知道的事情直接说不清楚。
+
+    说话的人是一个 6 到 9 岁的小朋友，语音识别结果经常有同音错字、漏字和语序混乱，比如「潦草」会变成「腰疼」、「词语接龙」会变成「加楼」、「用之前那个声音」会变成「看你之前那个声音」。请按他大概想表达的意图去理解和回答，不要纠结字面，不要说「你说什么」「我没听懂」，也不要复述纠正他的错字。实在猜不出来的时候，就用「你是想说……吗」的方式轻轻确认一次。 '
+  history_turns: 8
+  presets:
+    deepseek:
+      base_url: https://api.deepseek.com/v1
+      api_key: ''
+      model: deepseek-chat
+      temperature: 0.7
+      max_tokens: 512
+    deepseek-v4.1-flash:
+      base_url: http://127.0.0.1:9100/v1
+      model: deepseek-v4.1-flash
+      api_key: ''                        # 改成你的模型服务 Key
+      temperature: 0.7
+      max_tokens: 300
+      reasoning_effort: none
+      # 首包对冲：首个 token 超过这个秒数就并发再开一路（网关按轮询换号），
+      # 先到的那路说话；<=0 关闭。上游偶发 20~120 秒不回包时，孩子不用干等 15 秒兜底。
+      hedge_delay_seconds: 3.5
+      extra_body: {}
+    minimax:
+      base_url: https://api.minimax.cn/v1
+      api_key: ''                        # 改成你的模型服务 Key
+      model: MiniMax-M3.1-Flash
+      temperature: 0.7
+      max_tokens: 256
+      reasoning_effort: ''
+      extra_body: {}
+asr:
+  engine: sensevoice
+  model_dir: models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+  language: zh
+  use_itn: true
+  num_threads: 2
+tts:
+  engine: maoxiang
+  voice: zh_female_wfdiaomangongzhu_emo_v2_mars_bigtts
+  rate: +0%
+  volume: +0%
+  sapi_voice: ''
+  emotion: ''
+  emotion_scale: 0.0
+  loudness: 0.0
+vad:
+  model: models/silero_vad.onnx
+  threshold: 0.5
+  min_silence_ms: 1800
+  min_speech_ms: 250
+  merge_grace_ms: 500
+  merge_skip_seconds: 3.0
+  merge_max_seconds: 10.0
+  buffer_seconds: 60
+audio:
+  downlink_sample_rate: 24000
+  downlink_frame_ms: 20
+  downlink_bitrate: 32000
+limits:
+  max_output_chars_per_day: 3000
+  idle_bye_seconds: 0
+  wake_guard_seconds: 2.0
+  wake_guard_min_ms: 800
+music:
+  enabled: true
+  source: netease
+  bitrate: 64000
+  timeout: 12
+  cache_max_mb: 200
+mcp:
+  direct_reply: true
+  enabled_tools:
+  - get_time
+  - get_weather
+  - calculator
+  - get_device_status
+  - idiom_chain
+  - recite_poem
+  - pinyin_lookup
+  - math_practice
+  - english_word
+  - story_teller
+  - web_search
+  - get_weather_alarm
+  - set_reminder
+  - list_reminders
+  - cancel_reminder
+  - play_music
+  - stop_music
+  - control_music
+  weather_city: 北京

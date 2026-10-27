@@ -1,0 +1,23 @@
+# 运行时配置（含个人 Key / IP / 孩子称呼，不提交）
+config.yaml
+
+# 运行期数据与模型（体积大 / 含个人对话记录）
+data/
+models/
+raw/
+_pylibs/
+
+# 本地依赖软链接（pip install -r requirements.txt 之后无需它们）
+/h11
+/httpcore
+/httpx
+/pypinyin
+/sniffio
+/websockets
+
+# Python
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+venv/
