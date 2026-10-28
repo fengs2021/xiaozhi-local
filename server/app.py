@@ -1556,6 +1556,29 @@ def create_app(cfg: Dict[str, Any]) -> web.Application:
 
     a.on_cleanup.append(_stop_bedbook)
 
+    async def _warm_story_audio(app_: web.Application) -> None:
+        """后台预热 B 站客户端（首页 buvid + gaia 激活 + wbi key，冷启动约 1 秒）。"""
+        try:
+            from . import story_audio
+
+            await asyncio.sleep(6.0)
+            await story_audio.client().warmup()
+            log.info("故事音频源已就绪")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("故事音频预热失败: %s", exc)
+
+    a.on_startup.append(_warm_story_audio)
+
+    async def _stop_story_audio(app_: web.Application) -> None:
+        try:
+            from . import story_audio
+
+            await story_audio.client().close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    a.on_cleanup.append(_stop_story_audio)
+
     async def _stop_memory_agent(app_: web.Application) -> None:
         try:
             await app_ctx.memory_agent.stop()

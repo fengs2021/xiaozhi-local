@@ -797,7 +797,19 @@ class DeviceSession:
         """工具取回故事后挂在这里：等「好呀，我们来讲《X》」播完再开讲。"""
         title = str((story or {}).get("title") or "").strip()
         text = str((story or {}).get("text") or "").strip()
-        if not text:
+        plan = (story or {}).get("audio")
+        if not text and not plan:
+            return
+        if plan:
+            # 在线音频（B 站 / 喜马拉雅）：一集已经录好，直接播放不走 TTS
+            self.pending_story = {"title": title, "audio": plan}
+            log.info(
+                "[%s] 待放故事音频：%s（%s 第 %d 集）",
+                self.stats.session_id[:8],
+                title or "-",
+                str(plan.get("source") or "-"),
+                int(plan.get("index") or 0) + 1,
+            )
             return
         self.pending_story = {"title": title, "text": text}
         log.info(
@@ -812,7 +824,8 @@ class DeviceSession:
         story, self.pending_story = self.pending_story, None
         if not story or self._closed:
             return
-        task = asyncio.create_task(self._play_story(story), name="story")
+        player = self._play_story_audio if story.get("audio") else self._play_story
+        task = asyncio.create_task(player(story), name="story")
         self._story_task = task
         self._tasks.append(task)
         task.add_done_callback(lambda x: self._tasks.remove(x) if x in self._tasks else None)
@@ -940,6 +953,118 @@ class DeviceSession:
                 "[%s] 讲完故事：%s（共 %d 包 %.2fs 音频，用时 %.1fs）",
                 sid,
                 title or "-",
+                total_packets,
+                total_samples / float(self.down_rate or 1),
+                time.time() - t0,
+            )
+
+    async def _play_story_audio(self, story: Dict[str, Any]) -> None:
+        """在线故事音频：整集下载 → 解码 → 按 20ms 帧推给设备。
+
+        这种东西不是 TTS，一集就是几百秒真人录音，所以自己建编码器逐帧推。
+        一集放完自动接同一套合集的下一集（受 story_audio.max_episodes 限制），
+        中途被打断就靠 cancel 走 finally 补 tts stop。
+        """
+        plan = dict((story or {}).get("audio") or {})
+        title = str((story or {}).get("title") or plan.get("collection") or "").strip()
+        if not plan:
+            return
+        from . import story_audio
+        from .music import decode_bytes, polish
+
+        client = story_audio.client()
+        sid = self.stats.session_id[:8]
+        max_episodes = max(1, int(getattr(client, "max_episodes", 1) or 1))
+        self._speaking = True
+        self.stats.state = "speaking"
+        enc = OpusDownlinkEncoder(self.down_rate, self.down_frame_ms, self.down_bitrate)
+        interval = self.down_frame_ms / 1000.0
+        tts_started = False
+        total_packets = 0
+        total_samples = 0
+        episodes = 0
+        t0 = time.time()
+        try:
+            while plan and episodes < max_episodes:
+                if self._closed or self._abort:
+                    return
+                episodes += 1
+                episode = str(plan.get("episode") or plan.get("collection") or "").strip()
+                log.info(
+                    "[%s] 放故事音频：%s（%s 第 %d/%s 集）",
+                    sid,
+                    episode or title or "-",
+                    str(plan.get("source") or "-"),
+                    int(plan.get("index") or 0) + 1,
+                    plan.get("total") or "?",
+                )
+                data = await client.fetch(plan)
+                if not data:
+                    log.warning("[%s] 故事音频取不到，结束播放", sid)
+                    break
+                pcm = await asyncio.to_thread(decode_bytes, data, self.down_rate)
+                if pcm.size == 0:
+                    log.warning("[%s] 故事音频解码为空，结束播放", sid)
+                    break
+                pcm = await asyncio.to_thread(polish, pcm, self.down_rate)
+                if not tts_started:
+                    # 固件只有收到 tts start 才切 speaking、才播下行音频
+                    tts_started = True
+                    await self.send_json({"type": "tts", "state": "start"})
+                await self.send_json(
+                    {"type": "tts", "state": "sentence_start", "text": episode or title}
+                )
+                step = enc.frame_samples
+                next_at = time.monotonic()
+                for pos in range(0, pcm.size, step):
+                    if self._closed or self._abort:
+                        return
+                    chunk = pcm[pos : pos + step]
+                    if chunk.size == 0:
+                        continue
+                    for payload in enc.encode(chunk):
+                        if self._closed or self._abort:
+                            return
+                        await self.send_audio(payload)
+                        total_packets += 1
+                        next_at += interval
+                        delay = next_at - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        else:
+                            next_at = time.monotonic()
+                    total_samples += int(chunk.size)
+                if episodes >= max_episodes or self._closed or self._abort:
+                    break
+                plan = await client.next_episode(plan)
+                if plan is not None:
+                    await asyncio.sleep(max(STORY_GAP_SECONDS, 0.6))
+        except asyncio.CancelledError:
+            log.info("[%s] 故事音频被打断：%s", sid, title or "-")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] 放故事音频失败: %s", sid, exc)
+        finally:
+            if tts_started:
+                try:
+                    for payload in enc.flush():
+                        await self.send_audio(payload)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await self.send_json({"type": "tts", "state": "stop"})
+                except Exception:  # noqa: BLE001
+                    pass
+            self._speaking = False
+            if self.stats.state == "speaking":
+                self.stats.state = "idle"
+            if self._story_task is asyncio.current_task():
+                self._story_task = None
+            log.info(
+                "[%s] 故事音频播完：%s（%d 集，共 %d 包 %.2fs 音频，用时 %.1fs）",
+                sid,
+                title or "-",
+                episodes,
                 total_packets,
                 total_samples / float(self.down_rate or 1),
                 time.time() - t0,

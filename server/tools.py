@@ -265,8 +265,9 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "story_teller",
         "description": (
-            "从故事库里讲一个故事（童话、寓言、成语故事、科普都有）。"
-            "孩子说想听故事、讲个故事、要听《龟兔赛跑》、再来一个时使用。"
+            "讲一个故事：先查本地故事库，库里没有就上网找真人讲的音频（童话、寓言、"
+            "成语故事、西游记、睡前故事等都有）。孩子说想听故事、讲个故事、"
+            "要听《龟兔赛跑》、再来一个、接下来时一律调用本工具。"
             "故事很长，本工具只负责开头报个名字，正文会自动接着念，"
             "所以不要说「故事有点长」也不用复述内容。"
         ),
@@ -997,12 +998,59 @@ async def english_word(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-# ---------- story_teller（bedbook 故事 MCP） ----------
+# ---------- story_teller（bedbook 故事库 + 在线故事音频） ----------
 def _bedbook():
     """延迟导入 + 模块单例（stdio 子进程，一次启动多次调用）。"""
     from . import bedbook
 
     return bedbook.client()
+
+
+def _story_audio():
+    """延迟导入 + 模块单例（在线音频：B 站为主、喜马拉雅 RSS 兜底）。"""
+    from . import story_audio
+
+    return story_audio.client()
+
+
+# 孩子说这些是在要「接着上一套合集往下讲」
+_STORY_CONTINUE_WORDS = (
+    "接下来",
+    "下一集",
+    "下一个",
+    "继续讲",
+    "继续放",
+    "再讲一个",
+    "再来一个",
+    "还要听",
+    "接着讲",
+    "接着放",
+)
+
+
+async def _audio_story(title: str) -> Optional[Dict[str, Any]]:
+    """在网上找一集真人讲的故事音频，并把这一集先下下来。
+
+    先下载再答应孩子，是因为「答应了却播不出来」比「一开始就说没有」更难解释：
+    下不动就直接返回 None，退回 bedbook 文本库或者现编。
+    """
+    try:
+        client = _story_audio()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("故事音频客户端不可用: %s", exc)
+        return None
+    try:
+        plan = await client.find(title) if title else None
+        if not plan:
+            return None
+        data = await client.fetch(plan)
+        if not data:
+            log.warning("故事音频下载为空：%s", plan.get("episode"))
+            return None
+        return plan
+    except Exception as exc:  # noqa: BLE001
+        log.warning("在线故事音频失败（%s）：%s", title, exc)
+        return None
 
 
 async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1015,6 +1063,22 @@ async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
     from . import bedbook
 
     title = str((args or {}).get("title") or "").strip()
+    session = _tool_ctx().get("session")
+    queue = getattr(session, "queue_story", None)
+
+    # 0) 「接下来」「下一集」：接着上次那套合集播下一集
+    if queue is not None and title and any(w in title for w in _STORY_CONTINUE_WORDS):
+        try:
+            client = _story_audio()
+            plan = await client.continue_last()
+            if plan is not None and await client.fetch(plan):
+                name = str(plan.get("episode") or plan.get("collection") or "").strip()
+                queue({"title": str(plan.get("collection") or name), "audio": plan})
+                log.info("接着放故事音频：%s（%s）", name, plan.get("source"))
+                return _ok(f"好呀，接着听《{name}》。", direct=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("接着放故事音频失败: %s", exc)
+
     try:
         client = _bedbook()
         story = None
@@ -1024,17 +1088,36 @@ async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
                 # 孩子常常给的是主题词（恐龙、小猪、公主），按关键词再捞一次
                 story = await client.search(keyword=title)
             if story is None:
+                # 库里没有就上网找真人讲的音频（B 站为主、喜马拉雅 RSS 兜底）
+                plan = await _audio_story(title)
+                if plan is not None and queue is not None:
+                    name = str(plan.get("episode") or plan.get("collection") or title).strip()
+                    queue({"title": str(plan.get("collection") or name), "audio": plan})
+                    log.info(
+                        "放故事音频：%s（%s 第 %d 集）",
+                        name,
+                        plan.get("source"),
+                        int(plan.get("index") or 0) + 1,
+                    )
+                    return _ok(f"好呀，我们听《{name}》。", direct=True)
                 try:
                     items = await client.stories()
                 except Exception:  # noqa: BLE001
                     items = []
                 sample = "、".join(str(x.get("title") or "").strip() for x in items[:4])
-                hint = f"我会讲的有 {sample} 这些。" if sample else ""
-                return _ok(f"故事库里没有「{title}」。{hint}换个名字试试？", direct=True)
+                hint = f"故事库里有的 {sample} 这些。" if sample else ""
+                return _ok(f"没找到「{title}」。{hint}换个名字试试？", direct=True)
         if story is None:
             story = await client.random_story()
     except bedbook.BedbookError as exc:
+        # 故事库挂了还有在线音频这一条路
         log.warning("故事服务不可用: %s", exc)
+        plan = await _audio_story(title)
+        if plan is not None and queue is not None:
+            name = str(plan.get("episode") or plan.get("collection") or title).strip()
+            queue({"title": str(plan.get("collection") or name), "audio": plan})
+            log.info("放故事音频（故事库不可用）：%s", name)
+            return _ok(f"好呀，我们听《{name}》。", direct=True)
         return _err("故事库暂时打不开，等一下再讲好不好？")
 
     if not isinstance(story, dict):
@@ -1044,8 +1127,6 @@ async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
     if not text:
         return _err("这篇故事是空的，换一个吧。")
 
-    session = _tool_ctx().get("session")
-    queue = getattr(session, "queue_story", None)
     if queue is None:
         # 没有活跃会话（脚本调试、离线播报）时退回一次性短文本
         return _ok(f"《{name}》\n{text[:700]}")
