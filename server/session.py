@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -53,6 +54,44 @@ _MUSIC_MODE_TEXT = {
     "all": "列表循环",
     "shuffle": "随机播放",
 }
+
+
+# 讲故事：分段合成、按序下发。每段一句话，句子之间留一点停顿，
+# 听起来像在讲而不是在念稿。TTS 并发 3 条（与对话主链路同一个上限）。
+STORY_GAP_SECONDS = 0.12
+STORY_TTS_CONCURRENCY = 3
+STORY_MAX_CHARS = 4000
+_STORY_SENT_RE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?")
+
+
+def split_story_text(text: str, max_chars: int = 48) -> List[str]:
+    """把故事正文切成适合逐句合成的短句。
+
+    整篇一次丢给 TTS 要等它把两千字都合成完才出声（几十秒），孩子会以为
+    设备没反应。这里优先按句末标点切；单句超过 max_chars 的再按逗号/顿号切，
+    保证每段都能很快合成完、立刻开播。
+    """
+    out: List[str] = []
+    for raw in _STORY_SENT_RE.findall(str(text or "")):
+        seg = raw.strip()
+        if not seg:
+            continue
+        while len(seg) > max_chars:
+            cut = max(
+                seg.rfind("，", 0, max_chars),
+                seg.rfind("、", 0, max_chars),
+                seg.rfind(",", 0, max_chars),
+                seg.rfind("：", 0, max_chars),
+            )
+            if cut <= 4:
+                cut = max_chars - 1
+            head = seg[: cut + 1].strip()
+            if head:
+                out.append(head)
+            seg = seg[cut + 1 :].strip()
+        if seg:
+            out.append(seg)
+    return out
 
 
 def _norm_music_cmd(text: Any) -> str:
@@ -178,6 +217,12 @@ class DeviceSession:
         self._music_resume: Optional[Dict[str, Any]] = None
         self._music_resume_task: Optional[asyncio.Task] = None
         self.music_resume_delay = 8.0
+
+        # 讲故事：bedbook 故事 MCP 取回的长正文先挂在这里（pending_story），
+        # 等「好呀，我们来讲《X》」这句 TTS 播完再分段合成、按序下发。
+        # 整篇丢给 TTS 会先合成几十秒才开始出声，孩子以为没反应。
+        self.pending_story: Any = None
+        self._story_task: Optional[asyncio.Task] = None
 
         # 倒计时界面：可能同时有好几条在倒数（「3 分钟」里再补一句「10 分钟」）。
         # 屏幕永远显示最早到期的那条，它到点后把界面交还给下一条 —— 只存一条的话
@@ -670,6 +715,55 @@ class DeviceSession:
         }
         self._music_recent = {"song": dict(song), "at": time.time()}
 
+    async def _music_reply_fallback(self, reply: str, llm: Any) -> None:
+        """模型只口头答应「这就给你放《X》」却没调 play_music 时，按回复文本补一次。
+
+        实测 24 次点歌里 6 次模型漏调工具（工具清单涨到 22 个之后更容易漏），
+        这时歌名已经说给孩子听了，不响就是「点了没反应」。这里按文本兜底：
+        只在本轮确实没调过 play_music、且回复里已经报了歌名时才补。
+        """
+        if self.music is None or self.pending_music is not None:
+            return
+        if self._abort or self._closed:
+            return
+        if "play_music" not in (getattr(llm, "tool_names", ()) or ()):
+            return
+        if "play_music" in (getattr(llm, "last_tool_names", []) or []):
+            return
+        text = str(reply or "")
+        if not re.search(r"播放|放一首|放首|来一首|来点|这就放|接着放|给你放|给你播", text):
+            return
+        # 优先认书名号/引号里的歌名：「这就给你放《橡皮》」，原样取用——
+        # 《加油呀》的「呀」就是歌名的一部分，不能当语气词削掉。
+        match = re.search(r"[《「\"“]([^》」\"”]{1,30})[》」\"”]", text)
+        if match is not None:
+            title = match.group(1).strip()
+        else:
+            # 再退一步认紧跟「播放/放首」的裸歌名：「播放稻香」
+            bare = re.search(
+                r"(?:播放|放一首|放首|来一首|来首)([^，。！？、,.\s《》「」\"”]{1,20})", text
+            )
+            title = bare.group(1).strip().rstrip("吧呢啊呀哦嘛啦") if bare else ""
+            # 裸歌名容易误抓：「现在播放时间到了」→「时间到了」、「放点什么」→「点什么」
+            if title.startswith(("点", "时间", "完", "结束", "起来", "什么", "啥")):
+                title = ""
+            if title in {"歌", "首歌", "歌曲", "曲子", "音乐", "点儿"}:
+                title = ""
+        if not title:
+            return
+        log.info(
+            "[%s] 模型没调 play_music，按回复补播：%s", self.stats.session_id[:8], title
+        )
+        try:
+            result = await call_tool(
+                "play_music", {"keyword": title, "_ctx": {"session": self}}
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("兜底点歌失败: %s", exc)
+            return
+        if result.get("is_error") or self.pending_music is None:
+            log.warning("兜底点歌没生效: %s", result.get("text"))
+
     def _start_pending_music(self) -> None:
         """这句话已经说完，把刚才点好的歌接上。
 
@@ -697,6 +791,159 @@ class DeviceSession:
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("启动音乐失败: %s", exc)
+
+    # ---------- 讲故事（bedbook 故事 MCP） ----------
+    def queue_story(self, story: Dict[str, Any]) -> None:
+        """工具取回故事后挂在这里：等「好呀，我们来讲《X》」播完再开讲。"""
+        title = str((story or {}).get("title") or "").strip()
+        text = str((story or {}).get("text") or "").strip()
+        if not text:
+            return
+        self.pending_story = {"title": title, "text": text}
+        log.info(
+            "[%s] 待讲故事：%s（%d 字）",
+            self.stats.session_id[:8],
+            title or "-",
+            len(text),
+        )
+
+    def _start_pending_story(self) -> None:
+        """这句话已经说完，把挂着的故事分段播出去。"""
+        story, self.pending_story = self.pending_story, None
+        if not story or self._closed:
+            return
+        task = asyncio.create_task(self._play_story(story), name="story")
+        self._story_task = task
+        self._tasks.append(task)
+        task.add_done_callback(lambda x: self._tasks.remove(x) if x in self._tasks else None)
+
+    def _stop_story(self, reason: str = "") -> bool:
+        """停掉正在播的故事（打断、插话问问题、关会话时调）。"""
+        task, self._story_task = self._story_task, None
+        pending, self.pending_story = self.pending_story, None
+        if task is not None and not task.done():
+            task.cancel()
+            log.info("[%s] 停止讲故事：%s", self.stats.session_id[:8], reason or "-")
+            return True
+        if pending is not None:
+            log.info("[%s] 取消待讲故事：%s", self.stats.session_id[:8], reason or "-")
+            return True
+        return False
+
+    async def _play_story(self, story: Dict[str, Any]) -> None:
+        """把一篇长故事分段合成、按顺序下发。
+
+        与对话主链路同一套「并行合成 + 按序播放」口径：每句一个队列，合成端
+        最多 3 句并行往队列里推，播放端按原顺序消费，第一句合成完就能出声。
+        孩子说唤醒词或插话时任务被 cancel，残留句子在 finally 里一起取消。
+        """
+        title = str((story or {}).get("title") or "").strip()
+        text = str((story or {}).get("text") or "").strip()
+        sentences = [
+            s for s in (strip_for_speech(x).strip() for x in split_story_text(text[:STORY_MAX_CHARS])) if s
+        ]
+        if not sentences:
+            return
+        sid = self.stats.session_id[:8]
+        self._speaking = True
+        self.stats.state = "speaking"
+        interval = self.down_frame_ms / 1000.0
+        tts_pool = asyncio.Semaphore(STORY_TTS_CONCURRENCY)
+        queues: List[asyncio.Queue] = [asyncio.Queue() for _ in sentences]
+        tts_started = False
+        first_audio_at: Optional[float] = None
+        total_packets = 0
+        total_samples = 0
+        t0 = time.time()
+
+        async def _synth(idx: int, sent: str) -> None:
+            queue = queues[idx]
+            async with tts_pool:
+                try:
+                    async for chunk in self.tts.stream(sent):
+                        if self._closed:
+                            break
+                        if getattr(chunk, "size", 0):
+                            queue.put_nowait(chunk)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[%s] 故事分段合成失败: %s", sid, exc)
+                finally:
+                    queue.put_nowait(None)
+
+        tasks = [asyncio.create_task(_synth(i, s)) for i, s in enumerate(sentences)]
+        try:
+            log.info("[%s] 开始讲故事：%s（%d 句）", sid, title or "-", len(sentences))
+            for idx, sent in enumerate(sentences):
+                queue = queues[idx]
+                sent_started = False
+                next_at = time.monotonic()
+                while True:
+                    if self._closed or self._abort:
+                        return
+                    try:
+                        # 带超时轮询：合成端可能卡在信号量上，不能死等
+                        chunk = await asyncio.wait_for(queue.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                    if chunk is None:
+                        break
+                    if not sent_started:
+                        sent_started = True
+                        if not tts_started:
+                            tts_started = True
+                            await self.send_json({"type": "tts", "state": "start"})
+                        await self.send_json(
+                            {"type": "tts", "state": "sentence_start", "text": sent}
+                        )
+                        next_at = time.monotonic()
+                    for payload in self.encoder.encode(chunk):
+                        if self._closed or self._abort:
+                            return
+                        await self.send_audio(payload)
+                        total_packets += 1
+                        total_samples += int(getattr(chunk, "size", 0) or 0)
+                        if first_audio_at is None:
+                            first_audio_at = time.time()
+                        next_at += interval
+                        delay = next_at - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        else:
+                            next_at = time.monotonic()
+                # 句子收尾：把不足一帧的残余补零发出去
+                if not (self._closed or self._abort):
+                    for payload in self.encoder.flush():
+                        await self.send_audio(payload)
+                        total_packets += 1
+                if STORY_GAP_SECONDS > 0:
+                    await asyncio.sleep(STORY_GAP_SECONDS)
+        except asyncio.CancelledError:
+            log.info("[%s] 故事被打断：%s", sid, title or "-")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] 讲故事失败: %s", sid, exc)
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            if tts_started:
+                try:
+                    await self.send_json({"type": "tts", "state": "stop"})
+                except Exception:  # noqa: BLE001
+                    pass
+            self._speaking = False
+            if self.stats.state == "speaking":
+                self.stats.state = "idle"
+            if self._story_task is asyncio.current_task():
+                self._story_task = None
+            log.info(
+                "[%s] 讲完故事：%s（共 %d 包 %.2fs 音频，用时 %.1fs）",
+                sid,
+                title or "-",
+                total_packets,
+                total_samples / float(self.down_rate or 1),
+                time.time() - t0,
+            )
 
     # ---------- 打断后的续播 ----------
     def _cancel_music_resume(self) -> None:
@@ -955,6 +1202,7 @@ class DeviceSession:
         self._abort_reason = reason
         self._drop_pending()
         self._stop_music("打断")
+        self._stop_story("打断")
         pending = [t for t in list(self._utterance_tasks) if not t.done()]
         for t in pending:
             t.cancel()
@@ -1020,6 +1268,10 @@ class DeviceSession:
             # 8 秒后音乐又自己放回来会很怪。按关键词先兜一层。
             if any(word in text for word in MUSIC_STOP_WORDS):
                 self._clear_music_resume("听到停止指令")
+            # 孩子插话问问题：故事先停下，回答问题比讲完更重要。
+            # 只在这里停（识别出真话之后），不跟 VAD 段挂钩——否则故事自己的
+            # 声音被麦克风收到一点就把故事掐了。
+            self._stop_story("听到新的问题")
 
             self._abort = False
             # 语音切歌/改模式：短句命中就直接执行并回一句，不进模型（省一轮两秒多）
@@ -1224,6 +1476,8 @@ class DeviceSession:
             log.info("[%s] LLM: %s", self.stats.session_id[:8], reply)
             await self.send_json({"type": "llm", "emotion": "neutral", "text": reply})
 
+            await self._music_reply_fallback(reply, llm)
+
             await player
             t_play_done = time.time()
 
@@ -1259,6 +1513,8 @@ class DeviceSession:
             self._speaking = False
             self.stats.state = "idle"
             self._start_pending_music()
+            # 讲故事工具已经把正文挂在 pending_story 上，这句话说完就开讲
+            self._start_pending_story()
             # 刚才被唤醒词/按键打断的歌，安静 8 秒后从断点接上
             self._schedule_music_resume()
             # 这一轮已经答完，「刚停过歌」的记录不再有参考价值

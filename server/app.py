@@ -276,6 +276,7 @@ class App:
                     Path(cfg["_root"]) / "data" / "music" / "cache",
                     timeout=float(music_cfg.get("timeout", 12) or 12),
                     cache_max_mb=int(music_cfg.get("cache_max_mb", 200) or 200),
+                    sources=music_cfg.get("sources", music_cfg.get("source")),
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("音乐源初始化失败: %s", exc)
@@ -1531,6 +1532,29 @@ def create_app(cfg: Dict[str, Any]) -> web.Application:
             log.warning("后台记忆启动失败: %s", exc)
 
     a.on_startup.append(_start_memory_agent)
+
+    async def _warm_bedbook(app_: web.Application) -> None:
+        """启动后台把故事 MCP 子进程拉起来（冷启动 1.2 秒，别让孩子等）。"""
+        try:
+            from . import bedbook
+
+            await asyncio.sleep(3.0)
+            await bedbook.client().stories()
+            log.info("故事服务已就绪")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("故事服务预热失败: %s", exc)
+
+    a.on_startup.append(_warm_bedbook)
+
+    async def _stop_bedbook(app_: web.Application) -> None:
+        try:
+            from . import bedbook
+
+            await bedbook.client().close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    a.on_cleanup.append(_stop_bedbook)
 
     async def _stop_memory_agent(app_: web.Application) -> None:
         try:

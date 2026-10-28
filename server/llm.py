@@ -99,6 +99,9 @@ class LLMClient:
         # 首包对冲延迟：<=0 关闭（配置项 hedge_delay_seconds，默认 3.5 秒）
         self.hedge_delay = float(preset.get("hedge_delay_seconds", HEDGE_DELAY_SECONDS) or 0)
         self._tool_ctx: Dict[str, Any] = {}
+        # 本轮真正调用过的工具名（chat/chat_stream 每次开头重置），
+        # 会话层用它判断「模型是不是只嘴上答应了、其实没动手」。
+        self.last_tool_names: List[str] = []
         # 长期记忆段落：由会话层在每次对话前注入
         self.memory_block = ""
 
@@ -168,6 +171,14 @@ class LLMClient:
             lines.append(
                 "搜索后要用自己的话把结果讲给孩子听，不要说网址、不要说「根据搜索结果」这类词。"
                 "如果搜索没查到，就直说没查到，不要编。"
+            )
+        if "play_music" in self.tool_names:
+            lines.append(
+                "孩子说「播放……」「放一首……」「我想听……」「换首歌」「继续放」时，"
+                "必须调用 play_music，把歌名或歌手原样作为 keyword 传进去。"
+                "不许只回答「这就给你放」却不调用工具——那样设备根本不会出声。"
+                "play_music 自己会说「好，给你放……」，所以调完后你只补一句很短的话，别重复歌名。"
+                "没搜到就照实说没找到，不要编歌名。"
             )
         lines.append(
             "简单常识、聊天、成语接龙、口算、背诗、讲故事这类，直接用对应工具或直接回答，不必搜索。"
@@ -349,6 +360,7 @@ class LLMClient:
         if self.is_echo:
             return f"你说的是：{user_text}" if user_text else "我在。"
 
+        self.last_tool_names = []
         messages: List[Dict[str, Any]] = []
         system_text = self.build_system_message()
         if system_text:
@@ -387,6 +399,7 @@ class LLMClient:
                     text = (msg.content or "").strip()
                     return text or "我没想好怎么回答。"
 
+                self.last_tool_names.extend(c.function.name for c in calls)
                 # 把 assistant 的 tool_calls 原样回灌，保持协议完整
                 messages.append(
                     {
@@ -462,6 +475,7 @@ class LLMClient:
         现在每一轮都开 stream：正文增量立刻 yield，tool_calls 增量边收边拼，
         多工具并行执行。
         """
+        self.last_tool_names = []
         if self.is_echo:
             reply = f"你说的是：{user_text}" if user_text else "我在。"
             for ch in reply:
@@ -541,6 +555,9 @@ class LLMClient:
                     "工具轮 %d：%s",
                     round_no + 1,
                     ",".join(c["function"]["name"] for c in tool_calls),
+                )
+                self.last_tool_names.extend(
+                    c["function"]["name"] for c in tool_calls
                 )
                 from .tools import call_tool
 

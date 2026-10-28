@@ -264,13 +264,18 @@ TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "story_teller",
-        "description": "讲一个故事（寓言、成语故事、民间故事），带一句道理。孩子说想听故事、讲个故事时使用。",
+        "description": (
+            "从故事库里讲一个故事（童话、寓言、成语故事、科普都有）。"
+            "孩子说想听故事、讲个故事、要听《龟兔赛跑》、再来一个时使用。"
+            "故事很长，本工具只负责开头报个名字，正文会自动接着念，"
+            "所以不要说「故事有点长」也不用复述内容。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {
                     "type": "string",
-                    "description": "想听的故事名，例如 龟兔赛跑。留空则随机讲一个",
+                    "description": "想听的故事名或主题词，例如 龟兔赛跑、恐龙、小猪。留空则随机讲一个",
                 }
             },
             "required": [],
@@ -403,6 +408,56 @@ TOOLS: List[Dict[str, Any]] = [
                 },
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "study_points",
+        "description": (
+            "查询孩子的星星（积分）余额和一共赚了多少。"
+            "用户问「我有多少星星」「我多少积分」「我还差多少星」时使用。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "study_tasks",
+        "description": (
+            "看看今天还有哪些好习惯任务没做、哪些已经交了在等家长同意。"
+            "用户问「我今天还有什么任务」「还有什么没做」「我交的通过了吗」时使用。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "study_complete_task",
+        "description": (
+            "替孩子提交一个已完成的任务，交给家长审批，批了才加星星。"
+            "用户说「我晨读完了」「我做完作业了」「帮我交一下锻炼」时使用。"
+            "不想指定也可以不传 title，会自动挑唯一没做的那个。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "任务名字，比如「晨读」「多运动」「整理书桌」",
+                }
+            },
+        },
+    },
+    {
+        "name": "study_redeem",
+        "description": (
+            "用星星申请兑换奖励（零食、看电视、现金等），提交后等家长同意才扣星星。"
+            "用户说「我想换零食」「兑换看电视」「用星星换个奖励」时使用。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "奖励名字，比如「吃零食1个」「看电视20分钟」",
+                }
+            },
+            "required": ["title"],
         },
     },
 ]
@@ -942,30 +997,61 @@ async def english_word(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-# ---------- story_teller ----------
+# ---------- story_teller（bedbook 故事 MCP） ----------
+def _bedbook():
+    """延迟导入 + 模块单例（stdio 子进程，一次启动多次调用）。"""
+    from . import bedbook
+
+    return bedbook.client()
+
+
 async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
-    """讲一个故事。"""
-    from . import kid_tools as kt
+    """讲一个故事：从 bedbook 故事库取正文，交给会话分段播报。
+
+    这里只回一句开场白（direct，快速通道直接播），正文挂到 session.pending_story
+    上，等这句「好呀，我们来讲《X》」说完再一句一句合成播出去。整篇丢给 TTS 要
+    等几十秒才出声，孩子会以为设备没反应。
+    """
+    from . import bedbook
 
     title = str((args or {}).get("title") or "").strip()
-    if title:
-        s = kt.find_story(title)
-        if not s:
-            sample = "、".join(x["title"] for x in kt.STORIES[:6])
-            return _ok(f"没有找到《{title}》。我会讲的有：{sample} 等等，要不要随便来一个？")
-    else:
-        s = kt.random_story()
+    try:
+        client = _bedbook()
+        story = None
+        if title:
+            story = await client.search(title=title)
+            if story is None:
+                # 孩子常常给的是主题词（恐龙、小猪、公主），按关键词再捞一次
+                story = await client.search(keyword=title)
+            if story is None:
+                try:
+                    items = await client.stories()
+                except Exception:  # noqa: BLE001
+                    items = []
+                sample = "、".join(str(x.get("title") or "").strip() for x in items[:4])
+                hint = f"我会讲的有 {sample} 这些。" if sample else ""
+                return _ok(f"故事库里没有「{title}」。{hint}换个名字试试？", direct=True)
+        if story is None:
+            story = await client.random_story()
+    except bedbook.BedbookError as exc:
+        log.warning("故事服务不可用: %s", exc)
+        return _err("故事库暂时打不开，等一下再讲好不好？")
 
-    text = (s.get("text") or "").strip()
-    # 格林童话有的一万多字，语音场景必须截断
-    if len(text) > 700:
-        cut = max(text.rfind("。", 0, 700), text.rfind("！", 0, 700), text.rfind("？", 0, 700))
-        text = text[: cut + 1] if cut > 300 else text[:700] + "……"
-    seg = f"《{s['title']}》\n{text}"
-    moral = (s.get("moral") or "").strip()
-    if moral:
-        seg += f"\n这个故事告诉我们：{moral}"
-    return _ok(seg)
+    if not isinstance(story, dict):
+        return _err("故事库暂时打不开，等一下再讲好不好？")
+    name = str(story.get("title") or "").strip() or "故事"
+    text = str(story.get("content") or "").strip()
+    if not text:
+        return _err("这篇故事是空的，换一个吧。")
+
+    session = _tool_ctx().get("session")
+    queue = getattr(session, "queue_story", None)
+    if queue is None:
+        # 没有活跃会话（脚本调试、离线播报）时退回一次性短文本
+        return _ok(f"《{name}》\n{text[:700]}")
+    queue({"title": name, "text": text})
+    log.info("讲故事：%s（%d 字）", name, len(text))
+    return _ok(f"好呀，我们来讲《{name}》。", direct=True)
 
 async def get_weather_alarm(args: Dict[str, Any]) -> Dict[str, Any]:
     """查气象预警。city 为空则给全国最新几条。"""
@@ -1299,6 +1385,156 @@ async def control_music(args: Dict[str, Any]) -> Dict[str, Any]:
     return _err("没听懂要做什么操作。")
 
 
+# ---------- 学习激励（腾讯云 xuexi「习惯养成」） ----------
+
+
+def _study():
+    """延迟导入，避免没配 study 段时也拉起 httpx。"""
+    from . import study as mod
+
+    return mod
+
+
+def _norm_name(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isalnum())
+
+
+def _match_named(items: List[Dict[str, Any]], keyword: str) -> tuple:
+    """按名字找条目：先全等，再互相包含；返回 (命中项或 None, 候选列表)。"""
+    kw = _norm_name(keyword)
+    if not kw:
+        return None, []
+    exact = [it for it in items if _norm_name(it.get("title")) == kw]
+    if len(exact) == 1:
+        return exact[0], exact
+    hits = [
+        it
+        for it in items
+        if (n := _norm_name(it.get("title"))) and (kw in n or n in kw)
+    ]
+    if len(hits) == 1:
+        return hits[0], hits
+    return None, hits or exact
+
+
+def _titles(items: List[Dict[str, Any]], limit: int = 8) -> str:
+    names = [str(it.get("title") or "").strip() for it in items if it.get("title")]
+    if len(names) > limit:
+        return "、".join(names[:limit]) + " 等"
+    return "、".join(names)
+
+
+async def study_points(args: Dict[str, Any]) -> Dict[str, Any]:
+    study = _study()
+    try:
+        me = await study.client().me()
+    except study.StudyError as exc:
+        return _err(f"暂时查不到星星：{exc}")
+    stars = me.get("stars")
+    total = me.get("totalStars")
+    who = str(me.get("nickname") or "").strip()
+    head = f"{who}现在有 {stars} 颗星星" if who else f"现在有 {stars} 颗星星"
+    tail = f"，一共赚过 {total} 颗" if total else ""
+    return _ok(head + tail + "。", direct=True)
+
+
+async def study_tasks(args: Dict[str, Any]) -> Dict[str, Any]:
+    study = _study()
+    try:
+        items = await study.client().tasks()
+    except study.StudyError as exc:
+        return _err(f"暂时看不到任务：{exc}")
+    todo, pending, done = [], [], []
+    for it in items:
+        if not str(it.get("title") or "").strip():
+            continue
+        if it.get("pendingApproval"):
+            pending.append(it)
+        elif it.get("completed"):
+            done.append(it)
+        else:
+            todo.append(it)
+    parts = []
+    if todo:
+        parts.append(f"还有 {len(todo)} 个任务没做：{_titles(todo)}")
+    if pending:
+        parts.append(f"已经交了的：{_titles(pending)}，等家长同意")
+    if not parts:
+        parts.append(f"今天的 {len(items)} 个任务全都做完啦")
+    elif not todo and done:
+        parts.append("剩下的都做完啦")
+    return _ok("；".join(parts) + "。", direct=True)
+
+
+async def study_complete_task(args: Dict[str, Any]) -> Dict[str, Any]:
+    study = _study()
+    keyword = str(args.get("title") or args.get("task") or "").strip()
+    try:
+        items = await study.client().tasks()
+    except study.StudyError as exc:
+        return _err(f"暂时看不到任务：{exc}")
+    named = [it for it in items if str(it.get("title") or "").strip()]
+    if keyword:
+        target, hits = _match_named(named, keyword)
+        if target is None:
+            if hits:
+                return _ok(f"有这几个：{_titles(hits)}，你要交哪一个？", direct=True)
+            return _ok(f"任务里没有「{keyword}」哦。现在有：{_titles(named)}。", direct=True)
+    else:
+        open_items = [it for it in named if not it.get("completed") and not it.get("pendingApproval")]
+        if len(open_items) == 1:
+            target = open_items[0]
+        elif not open_items:
+            return _ok("今天的任务都交过啦，没有要再交的了。", direct=True)
+        else:
+            return _ok(f"你要交哪一个？{_titles(open_items)}。", direct=True)
+    title = str(target.get("title") or "").strip()
+    if target.get("pendingApproval"):
+        return _ok(f"「{title}」已经交过了，等家长同意就能拿到星星。", direct=True)
+    if target.get("completed"):
+        return _ok(f"「{title}」这个周期已经完成过了，不能再交啦。", direct=True)
+    try:
+        res = await study.client().complete_task(str(target.get("id") or ""))
+    except study.StudyError as exc:
+        return _err(f"「{title}」没交成功：{exc}")
+    extra = "，还掉了一张贴纸" if res.get("sticker") else ""
+    return _ok(f"好，我帮你申请了「{title}」，家长同意后星星就到账{extra}。", direct=True)
+
+
+async def study_redeem(args: Dict[str, Any]) -> Dict[str, Any]:
+    study = _study()
+    keyword = str(args.get("title") or args.get("reward") or "").strip()
+    if not keyword:
+        return _err("要换哪个奖励呢？")
+    try:
+        rewards = [it for it in await study.client().rewards() if it.get("is_active", True)]
+        me = await study.client().me()
+    except study.StudyError as exc:
+        return _err(f"暂时看不到奖励：{exc}")
+    target, hits = _match_named(rewards, keyword)
+    if target is None:
+        if hits:
+            return _ok(f"有这几个可以换：{_titles(hits)}，你要哪一个？", direct=True)
+        return _ok(f"奖励里没有「{keyword}」哦，现在能换的是：{_titles(rewards)}。", direct=True)
+    title = str(target.get("title") or "").strip()
+    try:
+        cost = int(target.get("star_cost") or 0)
+        stars = int(me.get("stars") or 0)
+    except (TypeError, ValueError):
+        cost, stars = 0, 0
+    if cost and stars < cost:
+        return _ok(
+            f"「{title}」要 {cost} 颗星星，你现在有 {stars} 颗，还差 {cost - stars} 颗。",
+            direct=True,
+        )
+    try:
+        await study.client().exchange(str(target.get("id") or ""))
+    except study.StudyError as exc:
+        return _err(f"「{title}」没换成功：{exc}")
+    return _ok(f"好，我帮你申请兑换「{title}」，要 {cost} 颗星星，家长同意后就扣星星。", direct=True)
+
+
+
 _DISPATCH = {
     "get_time": get_time,
     "get_weather": get_weather,
@@ -1318,6 +1554,10 @@ _DISPATCH = {
     "play_music": play_music,
     "stop_music": stop_music,
     "control_music": control_music,
+    "study_points": study_points,
+    "study_tasks": study_tasks,
+    "study_complete_task": study_complete_task,
+    "study_redeem": study_redeem,
 }
 
 
