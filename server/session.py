@@ -600,12 +600,22 @@ class DeviceSession:
         t.add_done_callback(lambda x: self._tasks.remove(x) if x in self._tasks else None)
 
     # ---------- 固定话术 / 收尾 ----------
+    def _daily_limit(self) -> int:
+        """当前生效的每日输出上限（0 = 不限）。
+
+        优先读 counter 上的实时值：网页里改完立刻生效，不用重启、也不用等重连。
+        """
+        if self.counter is not None:
+            return int(getattr(self.counter, "limit", 0) or 0)
+        return int(self.max_chars_per_day or 0)
+
     def _limit_reached(self) -> bool:
         """今天的输出字数是否已经到顶。"""
-        if self.counter is None or self.max_chars_per_day <= 0:
+        limit = self._daily_limit()
+        if self.counter is None or limit <= 0:
             return False
         try:
-            return self.counter.used(self.stats.device_id) >= self.max_chars_per_day
+            return self.counter.used(self.stats.device_id) >= limit
         except Exception as exc:  # noqa: BLE001
             log.warning("[%s] 读取输出计数失败: %s", self.stats.session_id[:8], exc)
             return False
@@ -1366,7 +1376,7 @@ class DeviceSession:
                 log.info(
                     "[%s] 今日输出已达上限 %d 字，结束会话",
                     self.stats.session_id[:8],
-                    self.max_chars_per_day,
+                    self._daily_limit(),
                 )
                 await self._say_and_hangup(LIMIT_BYE_TEXT, "每日输出限额")
                 return
@@ -1660,12 +1670,13 @@ class DeviceSession:
             if self.counter is not None and reply:
                 try:
                     total = self.counter.add(self.stats.device_id, len(reply))
-                    if self.max_chars_per_day > 0 and total >= self.max_chars_per_day:
+                    limit = self._daily_limit()
+                    if limit > 0 and total >= limit:
                         log.info(
                             "[%s] 今日累计输出 %d 字，已达上限 %d",
                             self.stats.session_id[:8],
                             total,
-                            self.max_chars_per_day,
+                            limit,
                         )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[%s] 累计输出字数失败: %s", self.stats.session_id[:8], exc)

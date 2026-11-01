@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -122,6 +123,52 @@ def save_config(cfg: Dict[str, Any], path: Path | None = None) -> None:
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=200),
         encoding="utf-8",
     )
+
+
+def set_daily_limit(cfg: Dict[str, Any], value: int, path: Path | None = None) -> None:
+    """只改 config.yaml 里 limits.max_output_chars_per_day 这一行的数值。
+
+    不走 save_config：那个会把整份 yaml 用 safe_dump 重写一遍，config.yaml 里的
+    注释和手工排版会全部丢掉。这里按行改，注释原样保留。
+    """
+    value = max(0, int(value))
+    cfg.setdefault("limits", {})["max_output_chars_per_day"] = value
+    p = Path(path) if path else CONFIG_PATH
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    lines = text.splitlines()
+    pat = re.compile(r"^(\s*)max_output_chars_per_day\s*:([^#\n]*)(#.*)?$")
+    in_limits = False
+    limits_idx = -1
+    done = False
+    for i, line in enumerate(lines):
+        if re.match(r"^limits\s*:", line):
+            in_limits = True
+            limits_idx = i
+            continue
+        if not in_limits:
+            continue
+        if re.match(r"^\S", line):   # 顶格 = 进入下一段
+            in_limits = False
+            continue
+        m = pat.match(line)
+        if m:
+            tail = ("  " + m.group(3)) if m.group(3) else ""
+            lines[i] = "%smax_output_chars_per_day: %d%s" % (m.group(1), value, tail)
+            done = True
+            break
+    if not done:
+        new_line = "  max_output_chars_per_day: %d" % value
+        if limits_idx >= 0:
+            lines.insert(limits_idx + 1, new_line)
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append("limits:")
+            lines.append(new_line)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def resolve_path(cfg: Dict[str, Any], value: str) -> str:

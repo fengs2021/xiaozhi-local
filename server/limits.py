@@ -26,6 +26,9 @@ class OutputCounter:
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, int]] = {}
         self._load()
+        # 每日输出上限（字数，0 = 不限）。App 启动时从 config.yaml 的 limits 段注入，
+        # 之后可以在网页「概览 -> 使用限制」里随时改，改完立刻对正在聊的会话生效。
+        self.limit: int = 0
 
     # ---------- 落盘 ----------
     def _load(self) -> None:

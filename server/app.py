@@ -24,6 +24,7 @@ from .config import (
     sanitize_persona,
     save_config,
     set_active,
+    set_daily_limit,
     upsert_preset,
     weather_city,
 )
@@ -257,6 +258,8 @@ class App:
         self.memory = MemoryStore(cfg["_root"])
         # 每日输出字数统计：儿童场景「聊太久就劝退」的计数，写 data/output_count.json
         self.counter = OutputCounter(cfg["_root"])
+        # 每日输出字数上限做成运行时可改的选项（网页 概览 -> 使用限制）
+        self.counter.limit = int((cfg.get("limits") or {}).get("max_output_chars_per_day", 0) or 0)
         # 人设库：多套人设存 data/personas.json，切换时写回 config.yaml 的 persona 段
         self.personas = PersonaStore(cfg["_root"])
         try:
@@ -562,6 +565,45 @@ class App:
         out = self._personas_view()
         out["item"] = item
         return web.json_response(out)
+
+    # ---------- 使用限制：每日输出字数上限 ----------
+    def _limits_view(self) -> Dict[str, Any]:
+        snap = self.counter.snapshot()
+        devices = snap.get("devices") or {}
+        return {
+            "max_output_chars_per_day": int(getattr(self.counter, "limit", 0) or 0),
+            "date": snap.get("date"),
+            "used_today": devices,
+            "total_today": sum(int(v) for v in devices.values()),
+        }
+
+    async def api_limits(self, request: web.Request) -> web.Response:
+        """读取 / 修改每日输出字数上限，可以顺手把今天的计数清零。"""
+        if request.method == "GET":
+            return web.json_response(self._limits_view())
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            data = {}
+        if "max_output_chars_per_day" in data:
+            try:
+                val = max(0, int(data["max_output_chars_per_day"]))
+            except (TypeError, ValueError):
+                return web.json_response({"error": "上限要填数字（0 表示不限制）"}, status=400)
+            self.cfg.setdefault("limits", {})["max_output_chars_per_day"] = val
+            self.counter.limit = val   # 立即对正在聊的会话生效
+            try:
+                set_daily_limit(self.cfg, val)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("保存使用限制失败: %s", exc)
+            log.info("每日输出字数上限改为 %s", "不限制" if val <= 0 else "%d 字" % val)
+        if data.get("reset_today"):
+            try:
+                self.counter.reset_today()
+                log.info("已清零今天的输出字数统计")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("清零输出计数失败: %s", exc)
+        return web.json_response(self._limits_view())
 
     async def api_config(self, request: web.Request) -> web.Response:
         """读取/更新 LLM 配置。"""
@@ -1487,6 +1529,7 @@ def create_app(cfg: Dict[str, Any]) -> web.Application:
     a.router.add_get("/xiaozhi/ota/", app_ctx.handle_ota)
     a.router.add_get(ws_path, app_ctx.handle_ws)
     a.router.add_get("/api/status", app_ctx.api_status)
+    a.router.add_route("*", "/api/limits", app_ctx.api_limits)
     a.router.add_route("*", "/api/config", app_ctx.api_config)
     a.router.add_post("/api/presets", app_ctx.api_presets)
     a.router.add_post("/api/test-preset", app_ctx.api_test_preset)

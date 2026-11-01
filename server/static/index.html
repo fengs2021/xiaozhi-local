@@ -431,6 +431,24 @@
     <div id="sessions"><div class="hint">暂无设备连接</div></div>
   </section>
 
+  <section id="tab-overview-limits">
+    <h2>使用限制</h2>
+    <div class="hint" style="margin:0 0 10px">
+      每天模型最多能跟孩子说多少字。到顶后小智会说「今天有点事情要忙」并挂断，第二天零点自动清零。
+      填 0 表示不限制；改完立刻生效，正在聊的会话也一起生效。
+    </div>
+    <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+      <div style="flex:0 0 200px">
+        <label>每日输出字数上限</label>
+        <input id="lim_max" type="number" min="0" step="500">
+      </div>
+      <button id="lim_save">保存</button>
+      <button class="ghost" id="lim_reset">今日清零</button>
+      <span class="hint" id="lim_hint"></span>
+    </div>
+    <div class="hint" id="lim_used" style="margin-top:10px">今日已说 0 字</div>
+  </section>
+
   <section id="tab-model" class="full">
     <h2>模型配置（支持任意 OpenAI 兼容接口）</h2>
     <div class="warnbox">
@@ -765,7 +783,7 @@ const TAB_KEY = 'xiaozhi.tab';
 function showTab(id){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab === id));
   // 一个 tab 可能对应多个 section（概览含服务状态 + 设备连接）
-  const group = id === 'tab-overview' ? ['tab-overview','tab-overview-devices'] : [id];
+  const group = id === 'tab-overview' ? ['tab-overview','tab-overview-devices','tab-overview-limits'] : [id];
   document.querySelectorAll('main > section').forEach(s=>{
     s.classList.toggle('on', group.includes(s.id));
   });
@@ -795,9 +813,52 @@ function fmtAgo(sec){
 }
 function escapeHtml(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
+/* ===== 使用限制（每日输出字数上限） ===== */
+let limitsLoadedAt = 0;
+async function loadLimits(){
+  try{
+    const d = await jget('/api/limits');
+    if(!d || d.error) return;
+    limitsLoadedAt = Date.now();
+    const max = d.max_output_chars_per_day || 0;
+    const used = d.total_today || 0;
+    const box = $('lim_max');
+    if(box && document.activeElement !== box) box.value = max;
+    const pct = max > 0 ? Math.min(100, Math.round(used * 100 / max)) : 0;
+    $('lim_used').innerHTML = max > 0
+      ? '今日已说 <b>' + used + '</b> / ' + max + ' 字（' + pct + '%）' +
+        (used >= max ? ' <span class="tag off">已到顶，会被劝退</span>' : '')
+      : '今日已说 <b>' + used + '</b> 字（不限制）';
+  }catch(e){ /* 忽略 */ }
+}
+function maybeLoadLimits(){
+  const sec = document.getElementById('tab-overview-limits');
+  if(!sec || !sec.classList.contains('on')) return;
+  if(Date.now() - limitsLoadedAt < 10000) return;
+  loadLimits();
+}
+$('lim_save').onclick = async () => {
+  const v = parseInt($('lim_max').value, 10);
+  if(isNaN(v) || v < 0){ $('lim_hint').textContent = '请填 0 或正整数'; return; }
+  const r = await jpost('/api/limits', { max_output_chars_per_day: v });
+  if(r.error){ $('lim_hint').textContent = '保存失败：' + r.error; return; }
+  $('lim_hint').textContent = v > 0 ? ('已保存 ✓ 每天最多 ' + v + ' 字') : '已保存 ✓ 不限制';
+  limitsLoadedAt = 0;
+  loadLimits();
+};
+$('lim_reset').onclick = async () => {
+  if(!confirm('把今天的「已说字数」清零？')) return;
+  const r = await jpost('/api/limits', { reset_today: true });
+  if(r.error){ $('lim_hint').textContent = '清零失败：' + r.error; return; }
+  $('lim_hint').textContent = '已清零 ✓';
+  limitsLoadedAt = 0;
+  loadLimits();
+};
+
 async function refresh(){
   try{
     const s = await jget('/api/status');
+    maybeLoadLimits();
     $('dot').className = 'dot on';
     $('ver').textContent = 'v' + s.version;
     const host = s.server.public_host || location.hostname;
