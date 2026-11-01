@@ -30,13 +30,29 @@ def clean_text(text: str) -> str:
     return _TAG_RE.sub("", text or "").strip()
 
 
+# SenseVoice 面对纯噪音/静音时偶尔整句吐这些「幻觉词」，同样没有实义
+NOISE_TEXTS = frozenset({
+    "谢谢观看", "谢谢收看", "谢谢大家观看", "感谢观看", "字幕志愿者",
+    "请不吝点赞订阅转发打赏支持", "订阅我的频道",
+})
+
+
 def is_filler(text: str) -> bool:
-    """整句只有语气词、且不是在发问时，认为不是有效输入。"""
+    """整句只有标点/语气词、且不是在发问时，认为不是有效输入。
+
+    纯标点也要挡：说完一句话设备回到聆听态，环境噪音被 VAD 当成一声
+    300~400ms 的人声切出来，SenseVoice 只给一个「。」。送进 LLM 只会换回
+    一句「嗯？怎么不说话了」，白等两秒多，孩子还以为小智在犯傻。
+    """
     t = clean_text(text)
     if not t:
         return True
     core = "".join(ch for ch in t if ch not in _PUNCT)
-    if not core or len(core) > FILLER_MAX_LEN:
+    if not core:
+        return True                      # 「。」「，。」「。。」这类纯标点
+    if core in NOISE_TEXTS:
+        return True
+    if len(core) > FILLER_MAX_LEN:
         return False
     if not all(ch in FILLER_CHARS for ch in core):
         return False

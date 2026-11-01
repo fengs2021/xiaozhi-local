@@ -1394,7 +1394,7 @@ class DeviceSession:
             if is_filler(text):
                 # 纯语气词（「嗯」「啊啊」）：孩子随口一声、环境噪音、VAD 切到半个字
                 # 都会产生这种结果，不值得为它跑一轮两秒多的 LLM 往返。
-                log.info("[%s] 识别为语气词，忽略: %s", self.stats.session_id[:8], text)
+                log.info("[%s] 识别为语气词/标点，忽略: %s", self.stats.session_id[:8], text)
                 return
             self.stats.last_stt = text
             log.info("[%s] ASR: %s", self.stats.session_id[:8], text)
