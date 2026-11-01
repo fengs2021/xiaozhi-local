@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -127,6 +128,173 @@ class SenseVoiceASR(_SherpaBase):
         )
 
 
+class FunASRNanoASR(_SherpaBase):
+    """Fun-ASR-Nano（阿里 FunAudioLLM）离线识别器，sherpa-onnx 版模型。
+
+    与 SenseVoice 的关系：同门，但这套是「encoder-adaptor + LLM 自回归解码」，
+    中文长句、口语连读、专有名词的成句能力更强；代价是解码慢（要逐 token 生成），
+    不像 SenseVoice 一次前向就出整句。
+
+    模型目录里需要有 encoder_adaptor / llm / embedding / tokenizer 四个文件，
+    sherpa-onnx 按 int8 → fp16 → 原始精度 的顺序自动挑。
+    """
+
+    def __init__(
+        self,
+        model_dir: str,
+        num_threads: int = 4,
+        language: str = "中文",
+        use_itn: bool = True,
+        max_new_tokens: int = 256,
+        sample_rate: int = 16000,
+    ):
+        import sherpa_onnx
+
+        super().__init__(sample_rate)
+        files = _pick_funasr_files(model_dir)
+        self._rec = sherpa_onnx.OfflineRecognizer.from_funasr_nano(
+            encoder_adaptor=files["encoder_adaptor"],
+            llm=files["llm"],
+            embedding=files["embedding"],
+            tokenizer=files["tokenizer"],
+            num_threads=int(num_threads),
+            sample_rate=sample_rate,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            debug=False,
+            provider="cpu",
+            language=str(language or ""),
+            itn=bool(use_itn),
+            max_new_tokens=int(max_new_tokens),
+        )
+        log.info(
+            "sherpa-onnx Fun-ASR-Nano 已加载: %s (language=%s itn=%s threads=%d)",
+            model_dir,
+            language,
+            use_itn,
+            num_threads,
+        )
+
+
+def _pick_funasr_files(model_dir: str) -> Dict[str, str]:
+    """在模型目录里认出 Fun-ASR-Nano 需要的四个文件。
+
+    官方压缩包命名是 encoder_adaptor.int8.onnx / llm.int8.onnx / embedding.int8.onnx /
+    tokenizer.json（不同版本可能带 fp16 或无后缀），这里按关键字扫一遍并优先 int8，
+    免得模型一升级就得改代码。
+    """
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"模型目录不存在: {model_dir}")
+    names = sorted(os.listdir(model_dir))
+    onnx = [n for n in names if n.endswith(".onnx")]
+
+    def best(keyword: str) -> str:
+        cand = [n for n in onnx if keyword in n.lower()]
+        if not cand:
+            return ""
+
+        def rank(name: str) -> int:
+            low = name.lower()
+            if ".int8." in low:
+                return 0
+            if "fp16" in low:
+                return 1
+            return 2
+
+        return os.path.join(model_dir, sorted(cand, key=rank)[0])
+
+    tok = ""
+    for name in ("tokenizer.json", "tokenizer.model", "tokens.txt"):
+        if name in names:
+            tok = os.path.join(model_dir, name)
+            break
+    files = {
+        "encoder_adaptor": best("encoder_adaptor") or best("encoder"),
+        "llm": best("llm"),
+        "embedding": best("embedding"),
+        "tokenizer": tok,
+    }
+    missing = [k for k, v in files.items() if not v]
+    if missing:
+        raise FileNotFoundError(f"模型目录缺文件 {missing}（现有: {names}）")
+    return files
+
+
+class FunASRGpuASR:
+    """通过本机 HTTP 服务调用 GPU 版 Fun-ASR-Nano（模型常驻显存）。
+
+    Fun-ASR-Nano 是「encoder-adaptor + LLM 自回归」，CPU 上每句要好几秒，跑不动；
+    所以模型常驻在 /root/funasr-gpu/serve.py 那个独立进程里（RTX 3070，bf16，
+    约 1.6GB 显存），这边只发原始 PCM 做 HTTP 调用。
+
+    服务不可用（显卡被占、进程重启、超时）时自动回退到本地 SenseVoice，
+    孩子不会因为后台服务抽风就听不到回应。
+    """
+
+    sample_rate = 16000
+
+    def __init__(
+        self,
+        url: str = "http://127.0.0.1:9411/asr",
+        timeout: float = 4.0,
+        language: str = "zh",
+        max_new_tokens: int = 96,
+        fallback: Any = None,
+    ):
+        self.url = str(url or "http://127.0.0.1:9411/asr")
+        self.timeout = float(timeout or 4.0)
+        self.language = str(language or "zh")
+        self.max_new_tokens = int(max_new_tokens or 96)
+        self.fallback = fallback
+        self._fails = 0
+        self._down_until = 0.0
+        log.info("Fun-ASR-Nano(GPU) 走 HTTP: %s（超时 %.1fs，回退 %s）",
+                 self.url, self.timeout, type(fallback).__name__ if fallback else "无")
+
+    def _http(self, pcm: np.ndarray, timeout: float) -> str:
+        import json
+        import urllib.request
+
+        q = "?language=%s&max_new_tokens=%d" % (self.language, self.max_new_tokens)
+        req = urllib.request.Request(
+            self.url + q,
+            data=pcm.astype(np.int16).tobytes(),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        return clean_text(data.get("text") or "")
+
+    def _use_fallback(self, pcm: np.ndarray, why: str) -> str:
+        if self.fallback is None:
+            return ""
+        try:
+            return self.fallback.transcribe(pcm)
+        except Exception as exc:  # pragma: no cover
+            log.error("SenseVoice 回退也失败: %s（原因 %s）", exc, why)
+            return ""
+
+    def transcribe(self, pcm: np.ndarray) -> str:  # noqa: D401
+        if pcm is None or pcm.size < self.sample_rate // 10:
+            return ""
+        now = time.time()
+        if now < self._down_until:          # 刚失败过，30 秒内直接走本地，别再等超时
+            return self._use_fallback(pcm, "服务熔断中")
+        try:
+            text = self._http(pcm, self.timeout)
+            self._fails = 0
+            return text
+        except Exception as exc:
+            self._fails += 1
+            if self._fails >= 2:            # 连续两次失败 → 熔断 30 秒
+                self._down_until = time.time() + 30.0
+                log.warning("GPU ASR 连续失败 %d 次，%s → 30 秒内改用 SenseVoice: %s",
+                            self._fails, self.url, exc)
+            else:
+                log.warning("GPU ASR 调用失败，本次用 SenseVoice: %s", exc)
+            return self._use_fallback(pcm, str(exc))
+
+
 class SherpaASR(_SherpaBase):
     """Paraformer 离线识别器（保留，可在 config 里切回去）。"""
 
@@ -160,6 +328,36 @@ def build_asr(cfg: Dict[str, Any], root: str) -> Any:
 
     a = cfg.get("asr") or {}
     engine = (a.get("engine") or "none").strip().lower()
+    if engine in ("funasr_gpu", "funasr-gpu", "funasr_http", "funasr_gpu_http"):
+        url = a.get("gpu_url") or "http://127.0.0.1:9411/asr"
+        fallback: Any = None
+        fb_dir = resolve_path(cfg, a.get("fallback_model_dir", "") or
+                              "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17")
+        try:
+            fallback = SenseVoiceASR(fb_dir, int(a.get("num_threads", 2)), language="zh")
+            log.info("GPU ASR 的回退引擎就绪: SenseVoice %s", fb_dir)
+        except Exception as exc:  # pragma: no cover
+            log.warning("回退引擎 SenseVoice 加载失败（不影响 GPU 主路）: %s", exc)
+        return FunASRGpuASR(
+            url=str(url),
+            timeout=float(a.get("gpu_timeout", 4.0) or 4.0),
+            language=str(a.get("language", "zh") or "zh"),
+            max_new_tokens=int(a.get("max_new_tokens", 96) or 96),
+            fallback=fallback,
+        )
+    if engine in ("funasr", "funasr_nano", "fun-asr", "fun_asr"):
+        model_dir = resolve_path(cfg, a.get("model_dir", ""))
+        try:
+            return FunASRNanoASR(
+                model_dir,
+                num_threads=int(a.get("num_threads", 4)),
+                language=str(a.get("language", "中文") or "中文"),
+                use_itn=bool(a.get("use_itn", True)),
+                max_new_tokens=int(a.get("max_new_tokens", 256)),
+            )
+        except Exception as exc:  # pragma: no cover
+            log.error("加载 Fun-ASR-Nano 模型失败: %s", exc)
+            return NullASR()
     if engine in ("sensevoice", "sense_voice", "sherpa"):
         model_dir = resolve_path(cfg, a.get("model_dir", ""))
         num_threads = int(a.get("num_threads", 2))
