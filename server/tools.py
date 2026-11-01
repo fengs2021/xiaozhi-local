@@ -116,348 +116,201 @@ WEATHER_CODES: Dict[int, str] = {
 _WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
 TOOLS: List[Dict[str, Any]] = [
+    # 说明：每个工具的描述都要尽量短——它们全部塞进每轮请求的 system 里，
+    # 6245 字符约等于 3100 token，实测直接抬高 TTFT。改描述时只保留「什么时候用」，
+    # 例子与细节留在处理函数里。新增工具务必控制在一两行以内。
     {
         "name": "get_time",
-        "description": "查询当前本地日期和时间（中国标准时间）。用户问现在几点、今天几号、今天星期几时使用。",
+        "description": "查当前日期时间。问几点、今天几号、星期几时必须调用，不能凭印象猜。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_weather",
-        "description": (
-            "查询天气。默认查当前天气；"
-            "用户问明天/后天/未来几天/周末时，"
-            "必须传 when 参数取预报，不要拿当前天气当预报。"
-        ),
+        "description": "查天气。问今天天气、明天/后天/未来几天时必须调用，预报要传 when。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "城市名，例如：北京、上海、广州、深圳、杭州、成都、武汉、西安、南京、重庆",
-                },
-                "when": {
-                    "type": "string",
-                    "description": (
-                        "查询时间。today=今天，tomorrow=明天，day_after=后天，"
-                        "week=未来一周。不填或 now 表示当前天气。"
-                    ),
-                },
+                "city": {"type": "string", "description": "城市，如 北京、上海"},
+                "when": {"type": "string", "description": "today/tomorrow/day_after/week；不填=当前"},
             },
             "required": [],
         },
     },
     {
         "name": "get_weather_alarm",
-        "description": (
-            "查询气象预警（暴雨、台风、大风、高温、寒潮等）。"
-            "用户问有没有预警、台风来了吗、要不要注意天气时使用。"
-        ),
+        "description": "查气象预警（暴雨、台风、高温等）。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "城市或省份名，例如：上海、浙江、广东。不填则查全国最新预警",
-                }
-            },
+            "properties": {"city": {"type": "string", "description": "省市，不填=全国"}},
             "required": [],
         },
     },
     {
         "name": "calculator",
-        "description": "计算四则运算表达式，支持加减乘除和括号。例如 (12+8)*3/4。",
+        "description": "算四则运算。孩子问算式结果时必须调用，不要心算。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "expression": {"type": "string", "description": "要计算的算式，只能包含数字和 + - * / ( ) . 空格"}
-            },
+            "properties": {"expression": {"type": "string", "description": "算式，只含数字与 + - * / ( ) ."}},
             "required": ["expression"],
         },
     },
     {
         "name": "get_device_status",
-        "description": "查询当前连接的小智设备状态，包括设备号、连接时长、在线状态和收发数据包数量。",
+        "description": "查设备号、连接时长、收发包数。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "idiom_chain",
-        "description": "成语接龙。用户说出一个成语时，返回以该成语最后一个字开头的成语；不给成语时随机给一个开头。适合陪小学生练习成语。",
+        "description": "成语接龙：给成语则回末字开头的成语，不给则随机开头。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "idiom": {
-                    "type": "string",
-                    "description": "上一个成语，例如 一心一意。留空则随机开始",
-                }
-            },
+            "properties": {"idiom": {"type": "string", "description": "上一个成语，留空随机"}},
             "required": [],
         },
     },
     {
         "name": "web_search",
-        "description": "联网搜索。当孩子问的知识超出你的记忆、需要最新信息（新闻、天气以外的实时数据、某个人物/事件的近期情况）时使用。返回标题和摘要，你要用自己的话把结果讲给孩子听，不要念网址。",
+        "description": "联网搜索。孩子问科普知识、新闻、动植物、历史人物等，先搜再答，别自己编。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "搜索关键词，用简洁的中文短语，例如 恐龙为什么灭绝、嫦娥六号最新消息",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "返回几条结果，默认 4，最多 8",
-                },
+                "query": {"type": "string", "description": "中文关键词，如 恐龙为什么灭绝"},
+                "limit": {"type": "integer", "description": "条数，默认 4"},
             },
             "required": ["query"],
         },
     },
     {
         "name": "pinyin_lookup",
-        "description": "查汉字的拼音和组词。孩子问某个字怎么读、有哪些词语时使用。支持一次查多个字。",
+        "description": "查汉字拼音和组词，可一次多个字。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "要查的字或词，例如 长、美丽、春天",
-                }
-            },
+            "properties": {"text": {"type": "string", "description": "字或词，如 长、春天"}},
             "required": ["text"],
         },
     },
     {
         "name": "math_practice",
-        "description": "口算练习。出题、判对错、看答案都用它。action 取值：new 出新题，check 检查答案，hint 给提示。",
+        "description": "口算练习：出题、判对错、给提示。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "description": "new 出新题 / check 检查上一题的答案 / hint 提示上一题怎么算",
-                    "enum": ["new", "check", "hint"],
-                },
-                "level": {
-                    "type": "integer",
-                    "description": "难度：1=20以内加减，2=100以内加减，3=乘法口诀，4=两位数乘一位数或除法。默认 1",
-                },
-                "answer": {
-                    "type": "string",
-                    "description": "action=check 时孩子给的答案，例如 21",
-                },
+                "action": {"type": "string", "enum": ["new", "check", "hint"], "description": "new 出题 / check 判答案 / hint 提示"},
+                "level": {"type": "integer", "description": "1=20以内 2=100以内 3=乘法口诀 4=两位乘除，默认 1"},
+                "answer": {"type": "string", "description": "check 时孩子给的答案"},
             },
             "required": ["action"],
         },
     },
     {
         "name": "english_word",
-        "description": "小学英语单词卡。查单词的中文意思和音标，或者随机来一张单词卡练习。",
+        "description": "英语单词卡：查词义音标，或随机来一张。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "英文单词或中文意思，例如 apple、苹果。留空则随机给一个",
-                }
-            },
+            "properties": {"query": {"type": "string", "description": "单词或中文，留空随机"}},
             "required": [],
         },
     },
     {
         "name": "story_teller",
-        "description": (
-            "讲一个故事：先查本地故事库，库里没有就上网找真人讲的音频（童话、寓言、"
-            "成语故事、西游记、睡前故事等都有）。孩子说想听故事、讲个故事、"
-            "要听《龟兔赛跑》、再来一个、接下来时一律调用本工具。"
-            "故事很长，本工具只负责开头报个名字，正文会自动接着念，"
-            "所以不要说「故事有点长」也不用复述内容。"
-        ),
+        "description": "讲故事。孩子想听故事、讲个故事、要听某故事、再来一个、下一集、接着讲时一律调用；正文自动接着念，你只报名字不复述。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "想听的故事名或主题词，例如 龟兔赛跑、恐龙、小猪。留空则随机讲一个",
-                }
-            },
+            "properties": {"title": {"type": "string", "description": "故事名或主题词，如 龟兔赛跑、恐龙；留空随机"}},
             "required": [],
         },
     },
     {
         "name": "recite_poem",
-        "description": "背诵古诗词。用户说诗名、作者或诗句片段时，返回对应诗词的完整原文与简单释义。适合小学生背诗。",
+        "description": "背古诗词：给诗名/作者/诗句，返回全文与释义。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "诗名、作者或诗句片段，例如 静夜思、李白、床前明月光",
-                }
-            },
+            "properties": {"query": {"type": "string", "description": "诗名、作者或诗句"}},
             "required": ["query"],
         },
     },
     {
         "name": "set_reminder",
-        "description": (
-            "设置提醒或闹钟，到点小智会自己开口说话。"
-            "「5 分钟后提醒我喝水」用 in_seconds=300；"
-            "「半小时后叫我」用 in_seconds=1800；"
-            "用户只说「倒计时 5 分钟」没说提醒内容时，也要调本工具：in_seconds=300、text 写「时间到啦」；"
-            "秒数可以带小数（90 秒、1 分半都换算成秒）。"
-            "「每天早晨 7 点喊我起床」用 at_clock=07:00 加 repeat=daily；"
-            "「明天早上 7 点叫我」用 at_clock=07:00 加 day=tomorrow。"
-            "text 要写成到点要说出口的那句话，例如 该喝水啦、起床啦该上学了。"
-        ),
+        "description": "设提醒/闹钟，到点小智主动说话。5 分钟后用 in_seconds=300；每天 7 点用 at_clock=07:00+repeat=daily；倒计时没说内容时 text 写「时间到啦」。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "到点要说的话，例如 该喝水啦、起床啦",
-                },
-                "in_seconds": {
-                    "type": "integer",
-                    "description": "多少秒之后提醒。用于「5 分钟后」「半小时后」这类相对时间",
-                },
-                "at_clock": {
-                    "type": "string",
-                    "description": "几点几分，24 小时制 HH:MM，例如 07:00、15:30。用于「7 点」「下午 3 点半」这类绝对时间",
-                },
-                "day": {
-                    "type": "string",
-                    "description": "配合 at_clock：today=今天（默认，这个点已过就算明天）、tomorrow=明天",
-                },
-                "repeat": {
-                    "type": "string",
-                    "description": "once=只提醒一次（默认）；daily=每天；weekdays=周一到周五；weekly=每周同一天",
-                },
+                "text": {"type": "string", "description": "到点要说的话，如 该喝水啦"},
+                "in_seconds": {"type": "integer", "description": "多少秒后（相对时间）"},
+                "at_clock": {"type": "string", "description": "HH:MM 24 小时制，如 07:00"},
+                "day": {"type": "string", "description": "today(默认) / tomorrow"},
+                "repeat": {"type": "string", "description": "once(默认) / daily / weekdays / weekly"},
             },
             "required": ["text"],
         },
     },
     {
         "name": "list_reminders",
-        "description": "查看已经设好的提醒和闹钟。用户问「我设了哪些提醒」「闹钟还在不在」时使用。",
+        "description": "看已设好的提醒和闹钟。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "cancel_reminder",
-        "description": (
-            "取消提醒或闹钟。用户说「取消提醒」「别叫我起床了」时使用。"
-            "不传 id 和 keyword 时取消最近设置的那一条。"
-        ),
+        "description": "取消提醒。给 id 或 keyword，都不给则取消最近一条。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "任务 id，从 list_reminders 得到。不填则按关键词或最近一条处理",
-                },
-                "keyword": {
-                    "type": "string",
-                    "description": "按内容关键词匹配，例如 喝水",
-                },
+                "id": {"type": "string", "description": "来自 list_reminders"},
+                "keyword": {"type": "string", "description": "内容关键词，如 喝水"},
             },
             "required": [],
         },
     },
     {
         "name": "play_music",
-        "description": (
-            "放一首歌。用户说「放首歌」「我想听稻香」「来点周杰伦」时使用。"
-            "keyword 用歌名或歌手，例如 稻香、周杰伦 晴天、小星星。"
-            "放起来后会一直播，直到用户说话或让停。"
-        ),
+        "description": "放歌，会一直播到孩子说话或让停。keyword 用歌名或歌手。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "keyword": {
-                    "type": "string",
-                    "description": "歌名或歌手，例如 稻香、周杰伦、孤勇者",
-                }
-            },
+            "properties": {"keyword": {"type": "string", "description": "歌名或歌手，如 稻香、孤勇者"}},
             "required": ["keyword"],
         },
     },
     {
         "name": "stop_music",
-        "description": "停止正在播放的音乐。用户说「别放了」「停」「关掉音乐」时使用。",
+        "description": "停止音乐。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "control_music",
-        "description": (
-            "控制正在播放的音乐：下一首 / 上一首 / 暂停 / 继续 / 停止 / 换播放模式。"
-            "用户说「下一首」「换一首」「上一首」「先暂停」「接着放」「单曲循环」"
-            "「随机播放」「列表循环」「放完就停」时使用。只说「停止」用 stop_music 也行。"
-        ),
+        "description": "控制音乐：下一首、上一首、暂停、继续、停止、播放模式。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["next", "prev", "pause", "resume", "stop", "mode"],
-                    "description": "要做的操作",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["off", "one", "all", "shuffle"],
-                    "description": (
-                        "action=mode 时必填。off=顺序放完就停，one=单曲循环，"
-                        "all=列表循环（默认），shuffle=随机播放"
-                    ),
-                },
+                "action": {"type": "string", "enum": ["next", "prev", "pause", "resume", "stop", "mode"], "description": "要做的操作"},
+                "mode": {"type": "string", "enum": ["off", "one", "all", "shuffle"], "description": "action=mode 时必填：off 放完停 / one 单曲 / all 列表(默认) / shuffle 随机"},
             },
             "required": ["action"],
         },
     },
     {
         "name": "study_points",
-        "description": (
-            "查询孩子的星星（积分）余额和一共赚了多少。"
-            "用户问「我有多少星星」「我多少积分」「我还差多少星」时使用。"
-        ),
+        "description": "查星星余额和累计赚了多少。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "study_tasks",
-        "description": (
-            "看看今天还有哪些好习惯任务没做、哪些已经交了在等家长同意。"
-            "用户问「我今天还有什么任务」「还有什么没做」「我交的通过了吗」时使用。"
-        ),
+        "description": "查今天未做的习惯任务、已提交待家长审批的任务。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "study_complete_task",
-        "description": (
-            "替孩子提交一个已完成的任务，交给家长审批，批了才加星星。"
-            "用户说「我晨读完了」「我做完作业了」「帮我交一下锻炼」时使用。"
-            "不想指定也可以不传 title，会自动挑唯一没做的那个。"
-        ),
+        "description": "替孩子提交已完成的任务，等家长审批加星。不传 title 自动挑唯一未做的。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "任务名字，比如「晨读」「多运动」「整理书桌」",
-                }
-            },
+            "properties": {"title": {"type": "string", "description": "任务名，如 晨读"}},
         },
     },
     {
         "name": "study_redeem",
-        "description": (
-            "用星星申请兑换奖励（零食、看电视、现金等），提交后等家长同意才扣星星。"
-            "用户说「我想换零食」「兑换看电视」「用星星换个奖励」时使用。"
-        ),
+        "description": "用星星申请兑奖，家长同意才扣星。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "奖励名字，比如「吃零食1个」「看电视20分钟」",
-                }
-            },
+            "properties": {"title": {"type": "string", "description": "奖励名，如 看电视20分钟"}},
             "required": ["title"],
         },
     },
