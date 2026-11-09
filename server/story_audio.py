@@ -83,6 +83,24 @@ def _page_title_ok(title: Any) -> bool:
     return True
 
 
+def _clean_episode(title: Any, index: int, collection: Any = "") -> str:
+    """把分P标题整理成给人看的篇名。
+
+    UP 主常常自己带编号，而且不一定从 001 开始（实测《猫武士》第一页标题就是
+    「猫武士002」，家长会以为从第二集开始播）。这里去掉自带的数字前缀，
+    统一按我们自己的顺序号说话。
+    """
+    text = _clean(title)
+    body = re.sub(r"^(?:第\s*[0-9一二三四五六七八九十百]+\s*[集回话期]|[0-9]{1,4})\s*[-_.、:：]?\s*", "", text)
+    # 尾巴上的编号也去掉（「猫武士002」→「猫武士」），只留中文名
+    if re.search(r"[\u4e00-\u9fff]", body):
+        body = re.sub(r"\s*[0-9]{1,4}\s*$", "", body)
+    body = body.strip() or _clean(collection)
+    if not body:
+        return "第 %d 集" % (index + 1)
+    return "%s 第 %d 集" % (body, index + 1)
+
+
 def _secs(value: Any) -> int:
     """"04:59" / "299" / "1:02:03" 都吃。"""
     s = str(value or "").strip()
@@ -302,9 +320,7 @@ class StoryAudio:
             if page is None:
                 continue
             total = len(pages)
-            episode = _clean(page.get("title"))
-            if not _page_title_ok(episode):
-                episode = "%s 第 %d 集" % (hit["title"], int(page["index"]) + 1)
+            episode = _clean_episode(page.get("title"), int(page["index"]), hit["title"])
             # 命中即返回：搜索结果本身已按相关度排序，
             # 再按「分P 数量」挑合集反而会把不相干的东西顶上来（实测「三只小猪」命中过洪恩宝宝学数学）
             return {

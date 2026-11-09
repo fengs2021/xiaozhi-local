@@ -668,6 +668,7 @@ class DeviceSession:
                 await self.send_json({"type": "tts", "state": "stop"})
             except Exception:  # noqa: BLE001
                 pass
+            await self._story_reply_fallback(reply, llm)
             self._start_pending_music()
 
     def _has_pending_schedule(self) -> bool:
@@ -729,6 +730,34 @@ class DeviceSession:
         }
         self._music_recent = {"song": dict(song), "at": time.time()}
 
+    async def _story_reply_fallback(self, reply: str, llm: Any) -> None:
+        """模型只口头答应「好呀，我们来讲《X》」却没调 story_teller 时按回复补一次。
+
+        2026-11-09 22:13 实测：孩子说「你给我放一个故事，用声强的安妮」，
+        模型回了「好呀，我们来讲《绿山墙的安妮》」但没调工具 → 什么都没播，
+        孩子以为坏了。这里按回复文本兜底调一次 story_teller。
+        """
+        if self.pending_story is not None or self._story_task is not None:
+            return
+        if self._abort or self._closed:
+            return
+        if "story_teller" not in (getattr(llm, "tool_names", ()) or ()):
+            return
+        if "story_teller" in (getattr(llm, "last_tool_names", []) or []):
+            return
+        text = str(reply or "")
+        if not re.search(r"讲个故事|讲一个|讲故事|我们来讲|听故事|放个故事|放一个故事|给你讲", text):
+            return
+        match = re.search(r"[《「\"“]([^》」\"”]{1,30})[》」\"”]", text)
+        title = match.group(1).strip() if match else ""
+        if title and re.search(r"故事|童话|寓言|成语", title) and len(title) > 12:
+            title = ""
+        log.info("[%s] 模型没调 story_teller，按回复补讲：%s", self.stats.session_id[:8], title or "（随机）")
+        try:
+            await call_tool("story_teller", {"title": title, "_ctx": {"session": self}})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("兜底讲故事失败: %s", exc)
+
     async def _music_reply_fallback(self, reply: str, llm: Any) -> None:
         """模型只口头答应「这就给你放《X》」却没调 play_music 时，按回复文本补一次。
 
@@ -786,6 +815,8 @@ class DeviceSession:
         等 TTS 收尾再真正开始。
         """
         prepared, self.pending_music = self.pending_music, None
+        if self.pending_story is not None:
+            return  # 这轮要说故事，别让续播的音乐盖掉故事
         if not prepared or self.music is None:
             return
         # 已经开始放新的歌了，之前那份「续播进度」作废
@@ -814,6 +845,10 @@ class DeviceSession:
         plan = (story or {}).get("audio")
         if not text and not plan:
             return
+        # 故事和音乐共用一路下行音频：开讲前必须把音乐停掉，
+        # 否则会出现「说要讲故事，结果一直在放音乐」（2026-11-09 22:13 实测）
+        if self.music is not None and getattr(self.music, "playing", False):
+            self._stop_music("开始讲故事")
         if plan:
             # 在线音频（B 站 / 喜马拉雅）：一集已经录好，直接播放不走 TTS
             self.pending_story = {"title": title, "audio": plan}
