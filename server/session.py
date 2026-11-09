@@ -66,6 +66,31 @@ STORY_MAX_CHARS = 4000
 _STORY_SENT_RE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?")
 
 
+_TTS_DROP = "\"'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011()\uff08\uff09*#\u2026\u2014"
+
+_TTS_MAP = {"\u2026": "\uff0c", "\u2014": "\uff0c", "\u3001": "\uff0c", "\uff1b": "\uff0c"}
+
+
+def _tts_safe(text: str) -> str:
+    """把朗读会报错的字符洗掉。
+
+    2026-11-09 实测：猫剪 TTS 对弯引号、书名号、省略号这类字符直接返回
+    TTSInvalidText，本地故事正文里全是这些（「"哎哟！"」「……」），
+    于是整篇故事一句都合不出来。这里把它们换成逗号或删掉。
+    """
+    out = []
+    for ch in str(text or ""):
+        if ch in _TTS_MAP:
+            out.append(_TTS_MAP[ch])
+        elif ch in _TTS_DROP:
+            continue
+        else:
+            out.append(ch)
+    clean = "".join(out)
+    clean = re.sub(r"[\uff0c]{2,}", "\uff0c", clean).strip(" \uff0c")
+    return clean
+
+
 def split_story_text(text: str, max_chars: int = 48) -> List[str]:
     """把故事正文切成适合逐句合成的短句。
 
@@ -1659,7 +1684,7 @@ class DeviceSession:
                         break
                     sentence, buf = buf[: cut + 1], buf[cut + 1 :]
                     if sentence.strip():
-                        enqueue(sentence)
+                        enqueue(_tts_safe(sentence))
             # LLM 生成到此结束。计时口径必须在这里断开：这一刻之前是模型吐字，
             # 之后全是 TTS 合成与音频下发，混在一起会把播放时长算进模型耗时。
             t_llm_done = time.time()
