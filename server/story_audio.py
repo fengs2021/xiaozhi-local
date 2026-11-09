@@ -39,7 +39,7 @@ MIN_AUDIO_BYTES = 120 * 1024
 MAX_AUDIO_BYTES = 40 * 1024 * 1024
 # 单集时长偏好：太短是片花，超过 15 分钟孩子听不完也占时间
 MIN_EPISODE_SECONDS = 60
-MAX_EPISODE_SECONDS = 900
+MAX_EPISODE_SECONDS = 1500
 _NORM_RE = re.compile(r"[\s\-_—·,，。.、!！?？:：;；\"'“”‘’()（）【】\[\]《》<>/|~]+")
 
 
@@ -313,6 +313,7 @@ class StoryAudio:
         from .bili import BiliError
 
         want = _norm(keyword)
+        want_ep = _episode_number(keyword)   # 「第三集」→ 3，没说就是 0
         tokens = [t for t in re.split(r"[\s,、,，/]+", str(keyword or "")) if len(t) >= 2]
         for hit in hits:
             title = str(hit.get("title") or "")
@@ -340,18 +341,16 @@ class StoryAudio:
                 if matched is None:
                     continue
                 log.info("合集「%s」不含关键词，改在分P里点到：%s", title[:20], matched.get("title"))
-            # 孩子点名了「第 N 集」就播那一集（没有就退回第一集）
+            # 默认从第一集开始按顺序听；孩子点名了「第 N 集」就播那一集
+            page = matched or playable[0]
             if want_ep:
                 picked = next(
                     (p for p in playable if int(p.get("index") or 0) + 1 == want_ep), None
                 )
                 if picked is not None:
                     page = picked
-                    episode = _clean_episode(picked.get("title"), int(picked["index"]), title)
                 else:
                     log.info("「%s」里没有第 %d 集，改播第一集", title[:20], want_ep)
-            # 合集本身就命中关键词时，从第一集开始按顺序听
-            page = matched or playable[0] if not want_ep else page
             if page is None:
                 continue
             total = len(pages)
