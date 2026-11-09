@@ -32,6 +32,9 @@ def clean_text(text: str) -> str:
 
 
 # SenseVoice 面对纯噪音/静音时偶尔整句吐这些「幻觉词」，同样没有实义
+# 只喊名字/称呼（热词「小爱同学」太强时，短促的一声「那好啊」也会被强行解成「小爱同学」）
+_ADDRESS_ONLY = frozenset({"小爱同学", "小智同学", "小智", "瑶瑶", "宝贝"})
+
 NOISE_TEXTS = frozenset({
     "谢谢观看", "谢谢收看", "谢谢大家观看", "感谢观看", "字幕志愿者",
     "请不吝点赞订阅转发打赏支持", "订阅我的频道",
@@ -51,6 +54,8 @@ def is_filler(text: str) -> bool:
     core = "".join(ch for ch in t if ch not in _PUNCT)
     if not core:
         return True                      # 「。」「，。」「。。」这类纯标点
+    if core in _ADDRESS_ONLY:
+        return True
     if core in NOISE_TEXTS:
         return True
     if len(core) > FILLER_MAX_LEN:

@@ -58,6 +58,8 @@ _MUSIC_MODE_TEXT = {
 
 # 讲故事：分段合成、按序下发。每段一句话，句子之间留一点停顿，
 # 听起来像在讲而不是在念稿。TTS 并发 3 条（与对话主链路同一个上限）。
+_ADDRESS_PREFIX_RE = re.compile(r"^\s*(小爱同学|小智同学|小智)[，,、。！!？?\s]*")
+
 STORY_GAP_SECONDS = 0.12
 STORY_TTS_CONCURRENCY = 3
 STORY_MAX_CHARS = 4000
@@ -1413,6 +1415,8 @@ class DeviceSession:
             text = await asyncio.get_running_loop().run_in_executor(None, self.asr.transcribe, pcm)
             text = (text or "").strip()
             asr_ms = int((time.time() - t_asr) * 1000)
+            # 「小爱同学，播放…」这类呼叫语不该进模型（孩子习惯了别的唤醒词）
+            text = _ADDRESS_PREFIX_RE.sub("", text).strip()
             if not text:
                 log.info("[%s] 识别为空，忽略", self.stats.session_id[:8])
                 return
