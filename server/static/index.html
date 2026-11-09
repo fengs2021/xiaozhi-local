@@ -150,6 +150,12 @@
   .hmsg.ai .bubble{background:#14161c;border:1px solid #262a33;color:#e6edf3;border-bottom-left-radius:4px}
   .hmsg .bubble .emo{margin-right:5px}
   .hmeta{display:flex;align-items:center;gap:8px;font-size:11.5px;color:#6e7681;margin-top:6px;padding:0 2px}
+  /* 这一轮讲了哪个故事：来源 + 集数 + 打开链接（B 站/喜马拉雅的可点） */
+  .hstory{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px;padding:5px 9px;
+    font-size:11.5px;color:#9fb4d0;background:#111823;border:1px solid #22303f;border-radius:9px}
+  .hstory .st-tag{color:#7ee0c0}
+  .hstory a{color:#7cb7ff;text-decoration:none}
+  .hstory a:hover{text-decoration:underline}
   .hact{background:transparent;border:0;color:#7d8590;padding:2px 5px;cursor:pointer;
     font-size:12.5px;border-radius:5px;line-height:1.3;font-family:inherit}
   .hact:hover{background:#1b1f2a;color:#e6edf3}
@@ -1660,6 +1666,7 @@ async function loadChatMessages(sid){
       </div>
       <div class="hmsg ai">
         <div class="bubble"><span class="emo">😊</span>${reply}</div>
+        ${m.story ? storyChip(m.story) : ''}
         <div class="hmeta">
           <span>${fmtClock(m.ts)}${m.first_audio_ms ? ' · 响应 ' + fmtMs(m.first_audio_ms) + ' · 模型 ' + fmtMs(m.llm_ms) : ''} · 以上内容由 AI 生成</span>
           <button class="hact" data-mi="${i}" data-role="ai" data-act="play" title="回放这段语音">▶</button>
@@ -1670,6 +1677,21 @@ async function loadChatMessages(sid){
   }catch(e){
     $('chatstream').innerHTML = '<div class="hempty">读取失败</div>';
   }
+}
+
+function storyChip(st){
+  // 这一轮播的故事：来源标签 + 篇名 + 第几集 + 打开来源
+  if(!st || typeof st !== 'object') return '';
+  const label = escapeHtml(String(st.label || st.source || '故事'));
+  const name = escapeHtml(String(st.episode || st.collection || ''));
+  const total = Number(st.total || 0), index = Number(st.index || 0);
+  const ep = total > 1 && index > 0 ? '（第 ' + index + '/' + total + ' 集）' : '';
+  const url = String(st.url || '');
+  const link = /^https?:\/\//.test(url)
+    ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer">查看来源 ↗</a>'
+    : '';
+  return '<div class="hstory"><span class="st-tag">📖 ' + label + '</span>' +
+         '<span>' + (name || '未记录篇名') + ep + '</span>' + link + '</div>';
 }
 
 function msgText(idx, role){

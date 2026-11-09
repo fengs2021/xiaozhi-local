@@ -439,6 +439,42 @@ class StoryAudio:
 _CLIENT: Optional[StoryAudio] = None
 
 
+def plan_meta(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """把播放计划整理成「这一轮讲的是哪个故事」的展示信息。
+
+    控制中心的历史对话要把来源和链接显出来，但这些字段不该让前端去猜
+    （B 站的分P序号从 0 开始、喜马拉雅给的是 RSS 地址），统一在这里算好。
+    """
+    plan = dict(plan or {})
+    source = str(plan.get("source") or "").strip()
+    meta: Dict[str, Any] = {
+        "source": source,
+        "label": "",
+        "collection": str(plan.get("collection") or "").strip(),
+        "episode": str(plan.get("episode") or "").strip(),
+        "index": int(plan.get("index") or 0) + 1,
+        "total": int(plan.get("total") or 0),
+        "author": str(plan.get("author") or "").strip(),
+        "duration": int(plan.get("duration") or 0),
+        "url": "",
+    }
+    bvid = str(plan.get("bvid") or "").strip()
+    if source == "bili":
+        meta["label"] = "B站"
+        if bvid:
+            meta["url"] = "https://www.bilibili.com/video/%s?p=%d" % (bvid, meta["index"])
+    elif source == "ximalaya":
+        meta["label"] = "喜马拉雅"
+        found = re.search(r"/album/(\d+)", str(plan.get("feed") or ""))
+        if found:
+            meta["url"] = "https://www.ximalaya.com/album/%s" % found.group(1)
+        if not meta["url"]:
+            meta["url"] = str(plan.get("audio") or "")
+    elif source:
+        meta["label"] = source
+    return meta
+
+
 def _cfg() -> Dict[str, Any]:
     from .config import load_config
 

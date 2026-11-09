@@ -222,6 +222,8 @@ class DeviceSession:
         # 等「好呀，我们来讲《X》」这句 TTS 播完再分段合成、按序下发。
         # 整篇丢给 TTS 会先合成几十秒才开始出声，孩子以为没反应。
         self.pending_story: Any = None
+        # 本轮讲了哪个故事（写进对话记录，控制中心可查来源与链接）
+        self._story_meta: Optional[Dict[str, Any]] = None
         self._story_task: Optional[asyncio.Task] = None
 
         # 倒计时界面：可能同时有好几条在倒数（「3 分钟」里再补一句「10 分钟」）。
@@ -813,6 +815,17 @@ class DeviceSession:
         if plan:
             # 在线音频（B 站 / 喜马拉雅）：一集已经录好，直接播放不走 TTS
             self.pending_story = {"title": title, "audio": plan}
+            try:
+                from .story_audio import plan_meta as _plan_meta
+
+                self._story_meta = _plan_meta(plan)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[%s] 故事来源整理失败: %s", self.stats.session_id[:8], exc)
+                self._story_meta = {
+                    "source": str(plan.get("source") or ""),
+                    "episode": str(plan.get("episode") or title),
+                    "url": "",
+                }
             log.info(
                 "[%s] 待放故事音频：%s（%s 第 %d 集）",
                 self.stats.session_id[:8],
@@ -822,6 +835,17 @@ class DeviceSession:
             )
             return
         self.pending_story = {"title": title, "text": text}
+        self._story_meta = {
+            "source": "bedbook",
+            "label": "本地故事库",
+            "collection": "",
+            "episode": title,
+            "index": 1,
+            "total": 1,
+            "author": "",
+            "duration": 0,
+            "url": "",
+        }
         log.info(
             "[%s] 待讲故事：%s（%d 字）",
             self.stats.session_id[:8],
@@ -1001,12 +1025,13 @@ class DeviceSession:
                 episodes += 1
                 episode = str(plan.get("episode") or plan.get("collection") or "").strip()
                 log.info(
-                    "[%s] 放故事音频：%s（%s 第 %d/%s 集）",
+                    "[%s] 放故事音频：%s（%s 第 %d/%s 集，bvid %s）",
                     sid,
                     episode or title or "-",
                     str(plan.get("source") or "-"),
                     int(plan.get("index") or 0) + 1,
                     plan.get("total") or "?",
+                    str(plan.get("bvid") or "-"),
                 )
                 data = await client.fetch(plan)
                 if not data:
@@ -1733,7 +1758,9 @@ class DeviceSession:
                 total_ms=total_ms,
                 audio=wav,
                 audio_secs=audio_secs,
+                story=self._story_meta,
             )
+            self._story_meta = None
         except Exception as exc:
             log.warning("[%s] 写对话历史失败: %s", self.stats.session_id[:8], exc)
 

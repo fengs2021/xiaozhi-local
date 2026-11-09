@@ -63,6 +63,7 @@ class ChatStore:
         ts: Optional[float] = None,
         audio: Optional[bytes] = None,
         audio_secs: float = 0.0,
+        story: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """追加一轮对话，返回写入的记录（未启用时返回 None）。
 
@@ -93,6 +94,10 @@ class ChatStore:
         if audio_rel:
             item["audio"] = audio_rel
             item["audio_secs"] = round(float(audio_secs or 0), 2)
+        if story:
+            # 这一轮讲了哪个故事（B 站哪一集 / 喜马拉雅哪一期 / 本地故事库哪篇），
+            # 控制中心的历史对话要显出来源和链接，否则只看得见「好呀，我们听《X》」
+            item["story"] = story
         path = self.dir / f"{_day_of(now)}.jsonl"
         line = json.dumps(item, ensure_ascii=False)
         try:
