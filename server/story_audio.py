@@ -59,6 +59,16 @@ _BAD_PAGE_WORDS = (
 )
 
 
+# 孩子要听中文故事，英语教学、日语动画这类合集一律不要（关键词本身在问才放行）
+_OFF_TOPIC_WORDS = ("英语", "英文", "双语", "日语", "韩语", "拼音版")
+
+
+def _off_topic(title: Any, keyword: Any) -> bool:
+    text = str(title or "")
+    key = str(keyword or "")
+    return any(w in text and w not in key for w in _OFF_TOPIC_WORDS)
+
+
 def _page_title_ok(title: Any) -> bool:
     """分P 标题能不能当篇名用（有的是 1638937199128.mp4 这种文件名）。"""
     text = str(title or "").strip()
@@ -192,15 +202,7 @@ class StoryAudio:
     def _pick_page(
         self, pages: List[Dict[str, Any]], want: str
     ) -> Optional[Dict[str, Any]]:
-        in_range = [
-            p
-            for p in pages
-            if MIN_EPISODE_SECONDS <= int(p.get("duration") or 0) <= MAX_EPISODE_SECONDS
-        ]
-        good = [p for p in in_range if _page_title_ok(p.get("title"))]
-        if not good:
-            # 分P标题全是文件名/废话页时，退回只看时长（篇名后面用合集名兜底）
-            good = in_range
+        good = self._playable(pages)
         if not good:
             return pages[0] if pages else None
         for page in good:  # 分P标题里直接点了名（「第3集 三只小猪」）
@@ -212,31 +214,99 @@ class StoryAudio:
         sweet = [p for p in good if 120 <= int(p.get("duration") or 0) <= 480]
         return (sweet or good)[0]
 
+    def _playable(self, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """能当一集播的分P（时长合适、标题不是「感谢观看」或文件名）。"""
+        in_range = [
+            p
+            for p in pages
+            if MIN_EPISODE_SECONDS <= int(p.get("duration") or 0) <= MAX_EPISODE_SECONDS
+        ]
+        good = [p for p in in_range if _page_title_ok(p.get("title"))]
+        return good or in_range
+
     async def _find_bili(self, keyword: str) -> Optional[Dict[str, Any]]:
+        """按关键词在 B 站找一套「有人讲」的合集，返回第一集的播放计划。
+
+        搜索词前面加「听书」命中率明显更高（搜到的是真人朗读合集，而不是动画片段、
+        儿歌、解说），但太具体的故事名加上前缀可能一条都搜不到，所以先试带前缀、
+        再退回原词。
+        """
         from .bili import BiliError
 
-        try:
-            hits = await self.bili().search(keyword, limit=6)
-        except BiliError as exc:
-            log.warning("B 站搜索失败: %s", exc)
-            return None
-        if not hits:
-            log.info("B 站没搜到「%s」", keyword)
-            return None
+        base = str(keyword or "").strip()
+        queries: List[str] = []
+        if base:
+            has_prefix = "听书" in base or "有声" in base
+            has_audience = any(w in base for w in ("儿童", "宝宝", "幼儿", "岁", "小学"))
+            if not has_prefix:
+                # 「听书 儿童 XX」→「听书 XX」→「XX」逐级放宽：
+                # 加上「儿童」能挡掉成人向合集，加上「听书」能挡掉动画/儿歌
+                if not has_audience:
+                    queries.append("听书 儿童 " + base)
+                queries.append("听书 " + base)
+            queries.append(base)
+        seen: set = set()
+        queries = [q for q in queries if not (q in seen or seen.add(q))]
+        for query in queries:
+            try:
+                hits = await self.bili().search(query, limit=6)
+            except BiliError as exc:
+                log.warning("B 站搜索失败（%s）: %s", query, exc)
+                continue
+            if not hits:
+                log.info("B 站没搜到「%s」", query)
+                continue
+            plan = await self._bili_plan(hits, base)
+            if plan is not None:
+                log.info("B 站命中（搜索词「%s」）：%s", query, plan.get("collection"))
+                return plan
+        log.info("B 站没找到能播的合集：%s", base)
+        return None
+
+    async def _bili_plan(
+        self, hits: List[Dict[str, Any]], keyword: str
+    ) -> Optional[Dict[str, Any]]:
+        """从搜索结果里挑第一套能播的合集，取它的第一集。"""
+        from .bili import BiliError
+
         want = _norm(keyword)
+        tokens = [t for t in re.split(r"[\s,、,，/]+", str(keyword or "")) if len(t) >= 2]
         for hit in hits:
+            title = str(hit.get("title") or "")
+            if _off_topic(title, keyword):
+                log.info("跳过「%s」：语种/内容不符", title[:24])
+                continue
             try:
                 pages = await self._bili_pages(hit["bvid"])
             except BiliError as exc:
                 log.warning("B 站分P列表失败: %s", exc)
                 continue
-            page = self._pick_page(pages, want)
+            playable = self._playable(pages)
+            if not playable:
+                continue
+            # 相关度：合集名命中关键词，或者某个分P标题点名了这一集；
+            # 都不沾边的合集直接跳过——不然「听书 龟兔赛跑」会搜到茅盾文学奖合集。
+            title_hit = bool(want) and want in _norm(title)
+            if not title_hit and tokens:
+                title_hit = any(t in title for t in tokens)
+            matched = None
+            if not title_hit:
+                matched = next(
+                    (p for p in playable if want and want in _norm(p.get("title"))), None
+                )
+                if matched is None:
+                    continue
+                log.info("合集「%s」不含关键词，改在分P里点到：%s", title[:20], matched.get("title"))
+            # 合集本身就命中关键词时，从第一集开始按顺序听
+            page = matched or playable[0]
             if page is None:
                 continue
             total = len(pages)
             episode = _clean(page.get("title"))
             if not _page_title_ok(episode):
                 episode = "%s 第 %d 集" % (hit["title"], int(page["index"]) + 1)
+            # 命中即返回：搜索结果本身已按相关度排序，
+            # 再按「分P 数量」挑合集反而会把不相干的东西顶上来（实测「三只小猪」命中过洪恩宝宝学数学）
             return {
                 "source": "bili",
                 "bvid": hit["bvid"],
