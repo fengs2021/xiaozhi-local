@@ -237,6 +237,7 @@ class FunASRGpuASR:
         self,
         url: str = "http://127.0.0.1:9411/asr",
         timeout: float = 4.0,
+        keywords: Any = None,
         language: str = "zh",
         max_new_tokens: int = 96,
         fallback: Any = None,
@@ -245,17 +246,24 @@ class FunASRGpuASR:
         self.timeout = float(timeout or 4.0)
         self.language = str(language or "zh")
         self.max_new_tokens = int(max_new_tokens or 96)
+        # 热词：孩子名字、常看书名、课本词语。Fun-ASR 是 LLM 解码，给了提示词
+        # 就不会把「瑶瑶」听成「摇摇」、「尼尔斯骑鹅旅行记」听成别的东西。
+        self.keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
         self.fallback = fallback
         self._fails = 0
         self._down_until = 0.0
-        log.info("Fun-ASR-Nano(GPU) 走 HTTP: %s（超时 %.1fs，回退 %s）",
-                 self.url, self.timeout, type(fallback).__name__ if fallback else "无")
+        log.info("Fun-ASR-Nano(GPU) 走 HTTP: %s（超时 %.1fs，热词 %d 个，回退 %s）",
+                 self.url, self.timeout, len(self.keywords),
+                 type(fallback).__name__ if fallback else "无")
 
     def _http(self, pcm: np.ndarray, timeout: float) -> str:
         import json
+        import urllib.parse
         import urllib.request
 
         q = "?language=%s&max_new_tokens=%d" % (self.language, self.max_new_tokens)
+        if self.keywords:
+            q += "&keywords=" + urllib.parse.quote(",".join(self.keywords))
         req = urllib.request.Request(
             self.url + q,
             data=pcm.astype(np.int16).tobytes(),
@@ -338,8 +346,12 @@ def build_asr(cfg: Dict[str, Any], root: str) -> Any:
             log.info("GPU ASR 的回退引擎就绪: SenseVoice %s", fb_dir)
         except Exception as exc:  # pragma: no cover
             log.warning("回退引擎 SenseVoice 加载失败（不影响 GPU 主路）: %s", exc)
+        words = a.get("hotwords") or []
+        if isinstance(words, str):
+            words = [w.strip() for w in words.replace("|", ",").split(",") if w.strip()]
         return FunASRGpuASR(
             url=str(url),
+            keywords=words,
             timeout=float(a.get("gpu_timeout", 4.0) or 4.0),
             language=str(a.get("language", "zh") or "zh"),
             max_new_tokens=int(a.get("max_new_tokens", 96) or 96),
