@@ -52,10 +52,21 @@ _MIXIN_TAB = [
 _SIGN_STRIP = "!'()*"
 
 # 风控重试用
+_READ_WORDS = ("讲故事", "朗读", "有声", "听书", "睡前故事", "故事会", "评书", "相声", "演播")
+_OFF_WORDS = ("音乐剧", "儿歌", "舞蹈", "演唱会", "解说", "混剪", "翻唱", "广场舞")
+
 _RISK_CODES = (-412, -352)
 _BACKOFF = (1.2, 2.6, 5.0)
 
 MAX_AUDIO_BYTES = 24 * 1024 * 1024
+
+
+def _track_id(track: Dict[str, Any]) -> int:
+    """DASH 音频轨的 id（30216=64K、30232=132K、30280=192K、30250=杜比、30251=Hi-Res）。"""
+    try:
+        return int(track.get("id") or 0)
+    except (TypeError, ValueError):
+        return 0
 MIN_AUDIO_BYTES = 60 * 1024  # 单集语音一般几百 KB，再小基本是空响应
 
 # 故事类内容的标题特征词（命中即可，够短再说时长）
@@ -407,6 +418,12 @@ class BiliClient:
             if want and want in _norm(title):
                 score += 100.0
             score += min(secs / 60.0, 120.0) * 0.1
+            # 讲故事优先要「有人在讲」的合集：朗读/有声/睡前故事加分；
+            # 音乐剧、儿歌、舞蹈、解说这类虽然也挂着故事名，但孩子听到的不是讲故事
+            if any(w in title for w in _READ_WORDS):
+                score += 30.0
+            if any(w in title for w in _OFF_WORDS):
+                score -= 25.0
             out.append(
                 {
                     "bvid": bvid,
@@ -464,7 +481,16 @@ class BiliClient:
         body = data.get("data") or {}
         dash = body.get("dash") or {}
         tracks = [t for t in (dash.get("audio") or []) if isinstance(t, dict)]
-        tracks.sort(key=lambda t: int(t.get("bandwidth") or 0), reverse=True)
+        # 讲故事只要人声，没必要拉最高码率：按音轨 id 偏好排序（30232=132K、30216=64K、
+        # 30280=192K），杜比(30250)/Hi-Res(30251)/flac 放最后——它们单集能到上百 MB，
+        # 下载慢还容易撞 MAX_AUDIO_BYTES，实测就是「音频超过大小上限」的来源。
+        prefer = {30232: 0, 30216: 1, 30280: 2}
+        tracks.sort(
+            key=lambda t: (
+                prefer.get(_track_id(t), 3),
+                int(t.get("bandwidth") or 0),
+            )
+        )
         urls: List[str] = []
         for track in tracks:
             for url in [track.get("baseUrl") or track.get("base_url")] + list(

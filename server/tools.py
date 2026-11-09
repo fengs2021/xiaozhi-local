@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import contextvars
+import random
 import logging
 import re
 import time
@@ -866,6 +867,16 @@ def _story_audio():
     return story_audio.client()
 
 
+# 孩子只说「讲个故事」没给篇名时，用这些主题词去网上找一集（随机挑，不会每次都是同一套）
+_RANDOM_STORY_KEYWORDS = (
+    "睡前故事 儿童",
+    "成语故事",
+    "童话故事",
+    "神话故事 儿童",
+    "西游记 儿童故事",
+)
+
+
 # 孩子说这些是在要「接着上一套合集往下讲」
 _STORY_CONTINUE_WORDS = (
     "接下来",
@@ -931,6 +942,30 @@ async def story_teller(args: Dict[str, Any]) -> Dict[str, Any]:
                 return _ok(f"好呀，接着听《{name}》。", direct=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("接着放故事音频失败: %s", exc)
+
+    # 1) 优先上网找真人讲的音频（用户 2026-11-09 定的顺序：能上网就上网）。
+    #    好处是有链接（控制中心能显示来源）、音质 132K、真人朗读；
+    #    网上下不动才退回本地故事库的文本，保证「说了要讲就一定讲得出来」。
+    prefer_online = True
+    try:
+        prefer_online = bool(getattr(_story_audio(), "prefer_online", True))
+    except Exception:  # noqa: BLE001
+        prefer_online = True
+    if prefer_online and queue is not None:
+        keyword = title or random.choice(_RANDOM_STORY_KEYWORDS)
+        plan = await _audio_story(keyword)
+        if plan is not None:
+            name = str(plan.get("episode") or plan.get("collection") or keyword).strip()
+            queue({"title": str(plan.get("collection") or name), "audio": plan})
+            log.info(
+                "放故事音频：%s（%s 第 %d 集，%s）",
+                name,
+                plan.get("source"),
+                int(plan.get("index") or 0) + 1,
+                plan.get("bvid") or "-",
+            )
+            return _ok(f"好呀，我们听《{name}》。", direct=True)
+        log.info("网上没找到「%s」的故事音频，改用本地故事库", keyword)
 
     try:
         client = _bedbook()

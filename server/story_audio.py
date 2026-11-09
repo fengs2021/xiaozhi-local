@@ -51,6 +51,28 @@ def _clean(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+# 分P 标题里这些是「感谢观看」「下集预告」之类的垃圾页，播出来孩子只会听到一句废话
+_BAD_PAGE_WORDS = (
+    "感谢观看", "感谢收看", "关注不迷路", "点赞", "投币", "收藏转发", "下集预告",
+    "预告", "片头", "片尾", "主题曲", "花絮", "彩蛋", "广告", "直播", "唠嗑",
+    "闲聊", "版权", "合集介绍", "写在最后", "未完待续",
+)
+
+
+def _page_title_ok(title: Any) -> bool:
+    """分P 标题能不能当篇名用（有的是 1638937199128.mp4 这种文件名）。"""
+    text = str(title or "").strip()
+    if not text:
+        return False
+    if any(w in text for w in _BAD_PAGE_WORDS):
+        return False
+    if re.fullmatch(r"[\d\W_]+", text):  # 纯数字或符号
+        return False
+    if re.search(r"\.(mp4|flv|wmv|avi|mkv|mov)$", text, re.I):
+        return False
+    return True
+
+
 def _secs(value: Any) -> int:
     """"04:59" / "299" / "1:02:03" 都吃。"""
     s = str(value or "").strip()
@@ -75,6 +97,8 @@ class StoryAudio:
         providers = str(cfg.get("providers") or "bili,ximalaya")
         self.providers = [p.strip() for p in providers.split(",") if p.strip()]
         self.max_episodes = max(1, int(cfg.get("max_episodes") or 2))
+        # 讲故事时是否优先上网找真人音频（true = 先找网上，找不到才用本地故事库文本）
+        self.prefer_online = cfg.get("prefer_online", True) is not False
         self.timeout = float(cfg.get("timeout") or 12.0)
         self.min_gap_ms = int(cfg.get("bili_min_gap_ms") or 600)
         self.sessdata = str(cfg.get("sessdata") or "")
@@ -168,18 +192,23 @@ class StoryAudio:
     def _pick_page(
         self, pages: List[Dict[str, Any]], want: str
     ) -> Optional[Dict[str, Any]]:
-        good = [
+        in_range = [
             p
             for p in pages
             if MIN_EPISODE_SECONDS <= int(p.get("duration") or 0) <= MAX_EPISODE_SECONDS
         ]
+        good = [p for p in in_range if _page_title_ok(p.get("title"))]
+        if not good:
+            # 分P标题全是文件名/废话页时，退回只看时长（篇名后面用合集名兜底）
+            good = in_range
         if not good:
             return pages[0] if pages else None
         for page in good:  # 分P标题里直接点了名（「第3集 三只小猪」）
             if want and want in _norm(page.get("title")):
                 return page
-        # 否则在前几集里随机挑一个，同一个合集连听不会总是第一集
-        return random.choice(good[:8])
+        # 3~8 分钟最适合睡前听；否则在前几集里随机挑一个，连听不会总是第一集
+        sweet = [p for p in good if 120 <= int(p.get("duration") or 0) <= 480]
+        return random.choice((sweet or good)[:8])
 
     async def _find_bili(self, keyword: str) -> Optional[Dict[str, Any]]:
         from .bili import BiliError
@@ -203,12 +232,15 @@ class StoryAudio:
             if page is None:
                 continue
             total = len(pages)
+            episode = _clean(page.get("title"))
+            if not _page_title_ok(episode):
+                episode = "%s 第 %d 集" % (hit["title"], int(page["index"]) + 1)
             return {
                 "source": "bili",
                 "bvid": hit["bvid"],
                 "cid": page["cid"],
                 "collection": hit["title"],
-                "episode": page["title"] or hit["title"],
+                "episode": episode,
                 "index": int(page["index"]),
                 "total": total,
                 "duration": int(page.get("duration") or 0),
