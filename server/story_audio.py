@@ -55,7 +55,7 @@ def _clean(text: Any) -> str:
 _BAD_PAGE_WORDS = (
     "感谢观看", "感谢收看", "关注不迷路", "点赞", "投币", "收藏转发", "下集预告",
     "预告", "片头", "片尾", "主题曲", "花絮", "彩蛋", "广告", "直播", "唠嗑",
-    "闲聊", "版权", "合集介绍", "写在最后", "未完待续",
+    "闲聊", "版权", "合集介绍", "写在最后", "未完待续", "跳过", "正片开始", "上集回顾",
 )
 
 
@@ -81,6 +81,31 @@ def _page_title_ok(title: Any) -> bool:
     if re.search(r"\.(mp4|flv|wmv|avi|mkv|mov)$", text, re.I):
         return False
     return True
+
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_to_int(text: str) -> int:
+    """把「三」「十二」「二十一」换成整数；认不出就返回 0。"""
+    text = str(text or "").strip()
+    if not text:
+        return 0
+    if text.isdigit():
+        return int(text)
+    if "十" in text:
+        left, _, right = text.partition("十")
+        tens = _CN_DIGITS.get(left, 1) if left else 1
+        ones = _CN_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(text, 0)
+
+
+def _episode_number(keyword: Any) -> int:
+    """孩子说「第三集」「第 3 节」「第三话」时取出 3；没说就返回 0。"""
+    m = re.search(r"第\s*([0-9一二三四五六七八九十两]{1,4})\s*[集节话回期]", str(keyword or ""))
+    return _cn_to_int(m.group(1)) if m else 0
 
 
 def _clean_episode(title: Any, index: int, collection: Any = "") -> str:
@@ -315,8 +340,18 @@ class StoryAudio:
                 if matched is None:
                     continue
                 log.info("合集「%s」不含关键词，改在分P里点到：%s", title[:20], matched.get("title"))
+            # 孩子点名了「第 N 集」就播那一集（没有就退回第一集）
+            if want_ep:
+                picked = next(
+                    (p for p in playable if int(p.get("index") or 0) + 1 == want_ep), None
+                )
+                if picked is not None:
+                    page = picked
+                    episode = _clean_episode(picked.get("title"), int(picked["index"]), title)
+                else:
+                    log.info("「%s」里没有第 %d 集，改播第一集", title[:20], want_ep)
             # 合集本身就命中关键词时，从第一集开始按顺序听
-            page = matched or playable[0]
+            page = matched or playable[0] if not want_ep else page
             if page is None:
                 continue
             total = len(pages)
@@ -449,7 +484,9 @@ class StoryAudio:
                         nxt.update(
                             {
                                 "cid": page["cid"],
-                                "episode": page["title"] or plan.get("collection") or "",
+                                "episode": _clean_episode(
+                                    page.get("title"), int(page["index"]), plan.get("collection")
+                                ),
                                 "index": int(page["index"]),
                                 "duration": int(page.get("duration") or 0),
                             }
