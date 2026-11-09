@@ -206,9 +206,11 @@ class StoryAudio:
         for page in good:  # 分P标题里直接点了名（「第3集 三只小猪」）
             if want and want in _norm(page.get("title")):
                 return page
-        # 3~8 分钟最适合睡前听；否则在前几集里随机挑一个，连听不会总是第一集
+        # 一律从第一集开始：孩子听一套故事就该按顺序听。
+        # （以前这里在前 8 集里 random.choice，结果 20:00 那几次直接从第2集、第6集开播。
+        #  想接着上次往下听有专门的续播分支 continue_last/next_episode，不该靠随机。）
         sweet = [p for p in good if 120 <= int(p.get("duration") or 0) <= 480]
-        return random.choice((sweet or good)[:8])
+        return (sweet or good)[0]
 
     async def _find_bili(self, keyword: str) -> Optional[Dict[str, Any]]:
         from .bili import BiliError
