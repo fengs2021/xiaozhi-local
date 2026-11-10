@@ -163,6 +163,9 @@ class StoryAudio:
         self._pages: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}
         self._feeds: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}
         self._last: Optional[Dict[str, Any]] = None
+        self._last_at: float = 0.0
+        # 同一套合集在这么久之内再点，就直接接着上一集播（孩子不会想重听开头）
+        self.resume_window = float(cfg.get("resume_window") or 1800)
 
     # ---------- 基础 ----------
     def bili(self) -> Any:
@@ -210,6 +213,23 @@ class StoryAudio:
             log.warning("故事音频预热失败: %s", exc)
 
     # ---------- 找集 ----------
+    async def _maybe_resume(self, plan: Optional[Dict[str, Any]], keyword: str) -> Optional[Dict[str, Any]]:
+        """同一套合集刚播过、孩子又点了 → 接着下一集，而不是从头再来。"""
+        if not plan or not self._last:
+            return plan
+        if _episode_number(keyword) == 1:      # 孩子明确要第一集，就让他重听
+            return plan
+        if time.time() - self._last_at > self.resume_window:
+            return plan
+        same = plan.get("bvid") and plan.get("bvid") == self._last.get("bvid")
+        if not same:
+            return plan
+        nxt = await self.next_episode(self._last)
+        if nxt is not None:
+            log.info("同一套合集，接着上一集播：%s", nxt.get("episode"))
+            return nxt
+        return plan
+
     async def find(self, keyword: str) -> Optional[Dict[str, Any]]:
         """按关键词找一集：B 站优先，失败退喜马拉雅 RSS。"""
         keyword = _clean(keyword)
@@ -218,13 +238,14 @@ class StoryAudio:
         if "bili" in self.providers:
             plan = await self._find_bili(keyword)
             if plan:
-                self._last = plan
-                return plan
+                nxt = await self._maybe_resume(plan, keyword)
+                self._last, self._last_at = (nxt or plan), time.time()
+                return nxt or plan
         if "ximalaya" in self.providers:
             plan = await self._find_ximalaya(keyword)
             if plan:
-                self._last = plan
-                return plan
+                self._last, self._last_at = plan, time.time()
+                return await self._maybe_resume(plan, keyword)
         return None
 
     async def continue_last(self) -> Optional[Dict[str, Any]]:

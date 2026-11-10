@@ -393,7 +393,11 @@ class App:
 
     # ---------- WebSocket ----------
     async def handle_ws(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=0)
+        # 心跳 30 秒太急：设备进 light sleep 后回不了 pong，服务端 15 秒就断连
+        # （日志里 24 次「No PONG received after 15.0 seconds」→ close_code=1006），
+        # 断了之后定时提醒/主动播报都推不出去。改成 2 分钟一次 ping、60 秒等 pong：
+        # 设备靠 Wi-Fi 唤醒收包，够醒得过来，又不会把正常休眠判成掉线。
+        ws = web.WebSocketResponse(heartbeat=120, max_msg_size=0)
         await ws.prepare(request)
 
         server = self.cfg.get("server") or {}
