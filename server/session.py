@@ -1113,19 +1113,25 @@ class DeviceSession:
                 # 按真实 PCM 长度复核，太短就当作坏集，跳过换下一集，别让孩子听一段就没了。
                 secs = pcm.size / float(self.down_rate or 1)
                 if secs < STORY_MIN_SECONDS and skips < STORY_MAX_SKIPS:
-                    skips += 1
-                    episodes -= 1          # 坏集不算进 max_episodes
+                    nxt = await client.next_episode(plan) if episodes < max_episodes else None
+                    if nxt is not None:
+                        skips += 1
+                        episodes -= 1      # 坏集不算进 max_episodes
+                        log.warning(
+                            "[%s] 这一集只有 %.1f 秒（远短于预期），跳过换下一集：%s",
+                            sid,
+                            secs,
+                            episode or title or "-",
+                        )
+                        plan = nxt
+                        continue
+                    # 只有一集、或者后面没集了：虽然短，也放出来，别让孩子等到一片安静
                     log.warning(
-                        "[%s] 这一集只有 %.1f 秒（远短于预期），跳过换下一集：%s",
+                        "[%s] 这一集只有 %.1f 秒，但后面没有可换的集了，就放这一段：%s",
                         sid,
                         secs,
                         episode or title or "-",
                     )
-                    plan = await client.next_episode(plan)
-                    if plan is None:
-                        log.warning("[%s] 后面没有可用集了，结束播放", sid)
-                        break
-                    continue
                 if not tts_started:
                     # 固件只有收到 tts start 才切 speaking、才播下行音频
                     tts_started = True

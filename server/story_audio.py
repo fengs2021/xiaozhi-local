@@ -164,8 +164,34 @@ class StoryAudio:
         self._feeds: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}
         self._last: Optional[Dict[str, Any]] = None
         self._last_at: float = 0.0
+        # 「上一集」要能跨重启：只放内存里的话，服务一重启「接着听」就退化成从头搜，
+        # 孩子上午听到第 3 集、下午说「继续」又要从第 1 集开始。
+        self._last_path = self.root / "data" / "story_audio" / "last_plan.json"
+        self._load_last()
         # 同一套合集在这么久之内再点，就直接接着上一集播（孩子不会想重听开头）
         self.resume_window = float(cfg.get("resume_window") or 1800)
+
+    def _load_last(self) -> None:
+        try:
+            data = json.loads(self._last_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001  文件不存在/坏了都当没有
+            return
+        plan = data.get("plan") if isinstance(data, dict) else None
+        if isinstance(plan, dict) and plan.get("source"):
+            self._last = plan
+            self._last_at = float(data.get("at") or 0.0)
+
+    def _save_last(self) -> None:
+        if not self._last:
+            return
+        try:
+            self._last_path.parent.mkdir(parents=True, exist_ok=True)
+            self._last_path.write_text(
+                json.dumps({"plan": self._last, "at": self._last_at}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("记录上次故事失败: %s", exc)
 
     # ---------- 基础 ----------
     def bili(self) -> Any:
@@ -240,11 +266,13 @@ class StoryAudio:
             if plan:
                 nxt = await self._maybe_resume(plan, keyword)
                 self._last, self._last_at = (nxt or plan), time.time()
+                self._save_last()
                 return nxt or plan
         if "ximalaya" in self.providers:
             plan = await self._find_ximalaya(keyword)
             if plan:
                 self._last, self._last_at = plan, time.time()
+                self._save_last()
                 return await self._maybe_resume(plan, keyword)
         return None
 
@@ -558,7 +586,10 @@ class StoryAudio:
         """取一集的音频字节（命中缓存直接返回）。"""
         if not plan:
             return b""
-        self._last = plan
+        # 真正取到这一集才算「上次听到哪」：下次「继续」从它的下一集开始，
+        # 而且服务重启后还认（落盘在 data/story_audio/last_plan.json）
+        self._last, self._last_at = plan, time.time()
+        self._save_last()
         path = self._cache_path(plan)
         try:
             if path.exists():

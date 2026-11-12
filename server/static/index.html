@@ -1683,7 +1683,15 @@ function storyChip(st){
   // 这一轮播的故事：来源标签 + 篇名 + 第几集 + 打开来源
   if(!st || typeof st !== 'object') return '';
   const label = escapeHtml(String(st.label || st.source || '故事'));
-  const name = escapeHtml(String(st.episode || st.collection || ''));
+  // 篇名要能一眼看出「是哪一套故事的哪一集」：合集名（太长截断）+ 集名。
+  // 只显示集名的话，「猴王学艺 第 2 集」看不出是《西游记少儿版》，事后回查也认不出。
+  const cut = (t, n) => (t.length > n ? t.slice(0, n) + '…' : t);
+  const coll = String(st.collection || '').trim();
+  const epName = String(st.episode || '').trim();
+  const parts = [];
+  if (coll) parts.push(escapeHtml(cut(coll, 18)));
+  if (epName && epName !== coll) parts.push(escapeHtml(epName));
+  const name = parts.join(' · ') || '未记录篇名';
   const total = Number(st.total || 0), index = Number(st.index || 0);
   const ep = total > 1 && index > 0 ? '（第 ' + index + '/' + total + ' 集）' : '';
   const url = String(st.url || '');
