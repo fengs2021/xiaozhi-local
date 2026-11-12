@@ -62,6 +62,10 @@ _ADDRESS_PREFIX_RE = re.compile(r"^\s*(小爱同学|小智同学|小智)[，,、
 
 STORY_GAP_SECONDS = 0.12
 STORY_TTS_CONCURRENCY = 3
+# 在线故事音频：解码后短于这个秒数就当坏集跳过（有的分P 声明 900 秒、实际只有十几秒）
+STORY_MIN_SECONDS = 60.0
+# 连续跳过多少集后不再挑，宁可放一段短的也别让设备静默
+STORY_MAX_SKIPS = 3
 STORY_MAX_CHARS = 4000
 _STORY_SENT_RE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?")
 
@@ -1079,6 +1083,7 @@ class DeviceSession:
         total_packets = 0
         total_samples = 0
         episodes = 0
+        skips = 0
         t0 = time.time()
         try:
             while plan and episodes < max_episodes:
@@ -1104,6 +1109,23 @@ class DeviceSession:
                     log.warning("[%s] 故事音频解码为空，结束播放", sid)
                     break
                 pcm = await asyncio.to_thread(polish, pcm, self.down_rate)
+                # 声明时长不可信：有的分P 标 900 秒、下下来实际只有 14 秒（野天鹅那集）。
+                # 按真实 PCM 长度复核，太短就当作坏集，跳过换下一集，别让孩子听一段就没了。
+                secs = pcm.size / float(self.down_rate or 1)
+                if secs < STORY_MIN_SECONDS and skips < STORY_MAX_SKIPS:
+                    skips += 1
+                    episodes -= 1          # 坏集不算进 max_episodes
+                    log.warning(
+                        "[%s] 这一集只有 %.1f 秒（远短于预期），跳过换下一集：%s",
+                        sid,
+                        secs,
+                        episode or title or "-",
+                    )
+                    plan = await client.next_episode(plan)
+                    if plan is None:
+                        log.warning("[%s] 后面没有可用集了，结束播放", sid)
+                        break
+                    continue
                 if not tts_started:
                     # 固件只有收到 tts start 才切 speaking、才播下行音频
                     tts_started = True

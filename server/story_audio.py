@@ -368,10 +368,22 @@ class StoryAudio:
                 picked = next(
                     (p for p in playable if int(p.get("index") or 0) + 1 == want_ep), None
                 )
-                if picked is not None:
-                    page = picked
-                else:
-                    log.info("「%s」里没有第 %d 集，改播第一集", title[:20], want_ep)
+                if picked is None:
+                    # 该合集没有第 N 集（「葫芦娃 第三集」那套只有 6 个分P，且第 3 个时长不合格）：
+                    # 退到离第 N 集最近的一集，而不是从第 1 集重来——孩子要的是「往后听」，
+                    # 从头开始等于刚才听的全白听了。
+                    picked = min(
+                        playable,
+                        key=lambda p: abs(int(p.get("index") or 0) + 1 - want_ep),
+                    )
+                    log.info(
+                        "「%s」里没有第 %d 集，改播最近的第 %d 集（%s）",
+                        title[:20],
+                        want_ep,
+                        int(picked.get("index") or 0) + 1,
+                        str(picked.get("title") or "")[:16],
+                    )
+                page = picked
             if page is None:
                 continue
             total = len(pages)
